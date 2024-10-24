@@ -13,32 +13,57 @@ class IPASigner:
         self.p12_password = p12_password
         self.temp_dir = None
         self.key_path = None
+        self.cert_path = None
 
     def cleanup(self):
         """Clean up temporary files and directories"""
         try:
             if self.key_path and os.path.exists(self.key_path):
                 os.remove(self.key_path)
+            if self.cert_path and os.path.exists(self.cert_path):
+                os.remove(self.cert_path)
             if self.temp_dir and os.path.exists(self.temp_dir):
                 shutil.rmtree(self.temp_dir)
         except Exception as e:
             print(f"Warning: Cleanup failed: {str(e)}")
 
-    def get_cert_info(self):
+    def extract_certificate(self):
+        """Extract certificate from P12 file"""
         try:
-            # Extract certificate info using OpenSSL
-            process = subprocess.run([
+            if self.temp_dir is None:
+                self.temp_dir = tempfile.mkdtemp()
+            self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
+            subprocess.run([
                 'openssl', 'pkcs12',
                 '-in', self.p12_path,
                 '-passin', f'pass:{self.p12_password}',
+                '-clcerts',
                 '-nokeys',
-                '-info'
+                '-out', self.cert_path
+            ], check=True, capture_output=True)
+            return True
+        except subprocess.CalledProcessError as e:
+            raise ValueError(f'Failed to extract certificate: {e.stderr}')
+
+    def get_cert_info(self):
+        """Extract and validate certificate information"""
+        try:
+            if not self.cert_path:
+                self.extract_certificate()
+            
+            # Get certificate subject
+            result = subprocess.run([
+                'openssl', 'x509',
+                '-in', self.cert_path,
+                '-subject',
+                '-noout'
             ], capture_output=True, text=True, check=True)
             
-            if 'iPhone' not in process.stdout and 'iOS' not in process.stdout:
+            subject = result.stdout.strip()
+            if 'iPhone' not in subject and 'iOS' not in subject:
                 raise ValueError('Not a valid iOS signing certificate')
                 
-            return process.stdout
+            return subject
         except subprocess.CalledProcessError as e:
             raise ValueError(f'Failed to read certificate: {e.stderr}')
 
@@ -81,6 +106,7 @@ class IPASigner:
 
     @staticmethod
     def is_binary_file(file_path):
+        """Check if a file is binary"""
         try:
             with open(file_path, 'rb') as f:
                 chunk = f.read(1024)
@@ -89,25 +115,20 @@ class IPASigner:
             return False
 
     def sign_binary(self, file_path):
+        """Sign a binary file using OpenSSL"""
         try:
-            # Try using ldid if available
-            try:
-                subprocess.run(['ldid', '-S', file_path], check=True, capture_output=True)
-                return True
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                # Fall back to OpenSSL signing
-                sig_path = file_path + '.sig'
-                subprocess.run([
-                    'openssl', 'cms',
-                    '-sign', '-binary',
-                    '-in', file_path,
-                    '-signer', self.p12_path,
-                    '-inkey', self.key_path,
-                    '-certfile', self.provision_path,
-                    '-outform', 'DER',
-                    '-out', sig_path
-                ], check=True, capture_output=True)
-                return True
+            sig_path = file_path + '.sig'
+            subprocess.run([
+                'openssl', 'cms',
+                '-sign', '-binary',
+                '-in', file_path,
+                '-signer', self.cert_path,
+                '-inkey', self.key_path,
+                '-certfile', self.provision_path,
+                '-outform', 'DER',
+                '-out', sig_path
+            ], check=True, capture_output=True)
+            return True
         except Exception as e:
             print(f"Warning: Failed to sign binary {file_path}: {str(e)}")
             return False
@@ -147,8 +168,8 @@ class IPASigner:
             if not app_dir:
                 raise ValueError('No .app bundle found in IPA')
 
-            # Verify certificate and extract private key
-            self.get_cert_info()
+            # Extract certificate and private key
+            self.extract_certificate()
             self.extract_private_key()
 
             # Copy provisioning profile
