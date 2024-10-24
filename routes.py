@@ -7,6 +7,12 @@ from app import app, db
 from models import User, SignedApp
 from signing import IPASigner
 
+@app.route('/')
+def index():
+    if not current_user.is_authenticated:
+        return redirect(url_for('login'))
+    return redirect(url_for('dashboard'))
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -98,3 +104,18 @@ def sign_app():
 def logout():
     logout_user()
     return redirect(url_for('login'))
+
+@app.route('/manifest/<filename>')
+def serve_manifest(filename):
+    return send_file(
+        os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], filename),
+        mimetype='application/x-plist'
+    )
+
+@app.route('/download/<filename>')
+def download_file(filename):
+    return send_file(
+        os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], filename),
+        mimetype='application/octet-stream',
+        as_attachment=True
+    )
