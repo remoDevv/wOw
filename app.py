@@ -26,7 +26,7 @@ login_manager.login_view = 'login'
 
 with app.app_context():
     import models
-    db.create_all()
+    db.create_all()  # Create tables if they don't exist
 
 @login_manager.user_loader
 def load_user(user_id):
