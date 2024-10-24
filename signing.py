@@ -28,22 +28,61 @@ class IPASigner:
             print(f"Warning: Cleanup failed: {str(e)}")
 
     def extract_certificate(self):
-        """Extract certificate from P12 file"""
+        """Extract certificate from P12 file with legacy algorithm support"""
         try:
             if self.temp_dir is None:
                 self.temp_dir = tempfile.mkdtemp()
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
-            subprocess.run([
+            
+            # First try with legacy algorithms enabled
+            cmd = [
                 'openssl', 'pkcs12',
                 '-in', self.p12_path,
                 '-passin', f'pass:{self.p12_password}',
+                '-legacy',  # Add legacy algorithm support
                 '-clcerts',
                 '-nokeys',
                 '-out', self.cert_path
-            ], check=True, capture_output=True)
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+            except subprocess.CalledProcessError:
+                # If legacy mode fails, try without it
+                cmd.remove('-legacy')
+                subprocess.run(cmd, check=True, capture_output=True)
+                
             return True
         except subprocess.CalledProcessError as e:
             raise ValueError(f'Failed to extract certificate: {e.stderr}')
+
+    def extract_private_key(self):
+        """Extract private key from P12 certificate with legacy algorithm support"""
+        try:
+            if self.temp_dir is None:
+                self.temp_dir = tempfile.mkdtemp()
+            self.key_path = os.path.join(self.temp_dir, 'private.key')
+            
+            cmd = [
+                'openssl', 'pkcs12',
+                '-in', self.p12_path,
+                '-passin', f'pass:{self.p12_password}',
+                '-legacy',  # Add legacy algorithm support
+                '-nocerts',
+                '-nodes',
+                '-out', self.key_path
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+            except subprocess.CalledProcessError:
+                # If legacy mode fails, try without it
+                cmd.remove('-legacy')
+                subprocess.run(cmd, check=True, capture_output=True)
+                
+            return True
+        except subprocess.CalledProcessError as e:
+            raise ValueError(f'Failed to extract private key: {e.stderr}')
 
     def get_cert_info(self):
         """Extract and validate certificate information"""
@@ -86,24 +125,6 @@ class IPASigner:
         except Exception as e:
             raise ValueError(f'Failed to extract bundle ID: {str(e)}')
 
-    def extract_private_key(self):
-        """Extract private key from P12 certificate"""
-        try:
-            if self.temp_dir is None:
-                self.temp_dir = tempfile.mkdtemp()
-            self.key_path = os.path.join(self.temp_dir, 'private.key')
-            subprocess.run([
-                'openssl', 'pkcs12',
-                '-in', self.p12_path,
-                '-passin', f'pass:{self.p12_password}',
-                '-nocerts',
-                '-nodes',
-                '-out', self.key_path
-            ], check=True, capture_output=True)
-            return True
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f'Failed to extract private key: {e.stderr}')
-
     @staticmethod
     def is_binary_file(file_path):
         """Check if a file is binary"""
@@ -118,7 +139,7 @@ class IPASigner:
         """Sign a binary file using OpenSSL"""
         try:
             sig_path = file_path + '.sig'
-            subprocess.run([
+            cmd = [
                 'openssl', 'cms',
                 '-sign', '-binary',
                 '-in', file_path,
@@ -127,7 +148,8 @@ class IPASigner:
                 '-certfile', self.provision_path,
                 '-outform', 'DER',
                 '-out', sig_path
-            ], check=True, capture_output=True)
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
             return True
         except Exception as e:
             print(f"Warning: Failed to sign binary {file_path}: {str(e)}")
