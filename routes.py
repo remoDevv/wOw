@@ -44,6 +44,42 @@ def dashboard():
     apps = SignedApp.query.filter_by(user_id=current_user.id).all()
     return render_template('dashboard.html', apps=apps)
 
+def validate_icon(icon_file, max_size, expected_size):
+    """Validate icon file size and dimensions"""
+    from PIL import Image
+    import io
+    
+    if not icon_file or not icon_file.filename:
+        return True, None
+        
+    # Check file size
+    icon_file.seek(0, os.SEEK_END)
+    size = icon_file.tell()
+    icon_file.seek(0)
+    
+    if size > max_size:
+        return False, f'Icon file too large (max {max_size/1024/1024}MB)'
+        
+    # Check dimensions
+    try:
+        img = Image.open(icon_file)
+        if img.size != (expected_size, expected_size):
+            return False, f'Icon must be {expected_size}x{expected_size} pixels'
+        icon_file.seek(0)
+        return True, None
+    except Exception as e:
+        return False, str(e)  # Convert exception message to string
+
+def save_icon(icon_file, upload_dir):
+    """Save icon file and return URL"""
+    if not icon_file or not icon_file.filename:
+        return None
+        
+    icon_filename = secure_filename(icon_file.filename)
+    icon_path = os.path.join(upload_dir, icon_filename)
+    icon_file.save(icon_path)
+    return request.host_url + 'download/' + icon_filename
+
 @app.route('/sign', methods=['POST'])
 @login_required
 def sign_app():
@@ -56,14 +92,16 @@ def sign_app():
     provision_file = request.files['provision']
     p12_password = request.form['p12_password']
 
-    # Save files
-    upload_dir = os.path.join(app.root_path, app.config['UPLOAD_FOLDER'])
-    os.makedirs(upload_dir, exist_ok=True)
-
+    # Validate required files
     if not ipa_file.filename or not p12_file.filename or not provision_file.filename:
         flash('Invalid file names')
         return redirect(url_for('dashboard'))
 
+    # Create upload directory
+    upload_dir = os.path.join(app.root_path, app.config['UPLOAD_FOLDER'])
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # Save required files
     ipa_path = os.path.join(upload_dir, secure_filename(ipa_file.filename))
     p12_path = os.path.join(upload_dir, secure_filename(p12_file.filename))
     provision_path = os.path.join(upload_dir, secure_filename(provision_file.filename))
@@ -72,7 +110,7 @@ def sign_app():
     p12_file.save(p12_path)
     provision_file.save(provision_path)
 
-    # Handle optional icon uploads
+    # Handle optional icons with validation
     icon = request.files.get('icon')
     full_size_icon = request.files.get('full_size_icon')
     
@@ -80,53 +118,59 @@ def sign_app():
     full_size_icon_url = None
     
     if icon:
-        icon_filename = secure_filename(icon.filename)
-        icon_path = os.path.join(upload_dir, icon_filename)
-        icon.save(icon_path)
-        icon_url = request.host_url + 'download/' + icon_filename
+        valid, error = validate_icon(icon, 1024*1024, 57)  # 1MB max, 57x57 pixels
+        if not valid and error:  # Check if error is not None
+            flash(str(error))  # Convert to string explicitly
+            return redirect(url_for('dashboard'))
+        icon_url = save_icon(icon, upload_dir)
         
     if full_size_icon:
-        full_size_filename = secure_filename(full_size_icon.filename)
-        full_size_path = os.path.join(upload_dir, full_size_filename)
-        full_size_icon.save(full_size_path)
-        full_size_icon_url = request.host_url + 'download/' + full_size_filename
+        valid, error = validate_icon(full_size_icon, 2*1024*1024, 512)  # 2MB max, 512x512 pixels
+        if not valid and error:  # Check if error is not None
+            flash(str(error))  # Convert to string explicitly
+            return redirect(url_for('dashboard'))
+        full_size_icon_url = save_icon(full_size_icon, upload_dir)
 
-    # Sign IPA
-    signer = IPASigner(ipa_path, p12_path, provision_path, p12_password)
-    success, signed_path = signer.sign_ipa()
+    # Sign IPA with improved error handling
+    try:
+        signer = IPASigner(ipa_path, p12_path, provision_path, p12_password)
+        success, result = signer.sign_ipa()
 
-    if success:
-        # Create manifest and save app
-        app_url = request.host_url + 'download/' + os.path.basename(signed_path)
-        bundle_id = signer.extract_bundle_id()
-        manifest = IPASigner.generate_manifest(
-            bundle_id,
-            app_url,
-            'Signed App',
-            icon_url,
-            full_size_icon_url
-        )
-        
-        manifest_path = os.path.join(upload_dir, 'manifest_' + os.path.basename(signed_path) + '.plist')
-        with open(manifest_path, 'wb') as f:
-            f.write(manifest)
+        if success:
+            # Create manifest and save app
+            app_url = request.host_url + 'download/' + os.path.basename(result)
+            bundle_id = signer.extract_bundle_id()
+            manifest = IPASigner.generate_manifest(
+                bundle_id,
+                app_url,
+                'Signed App',
+                icon_url,
+                full_size_icon_url
+            )
+            
+            manifest_path = os.path.join(upload_dir, 'manifest_' + os.path.basename(result) + '.plist')
+            with open(manifest_path, 'wb') as f:
+                f.write(manifest)
 
-        signed_app = SignedApp()
-        signed_app.user_id = current_user.id
-        signed_app.app_name = os.path.basename(ipa_path)
-        signed_app.bundle_id = bundle_id
-        signed_app.ipa_path = signed_path
-        signed_app.plist_path = manifest_path
-        signed_app.installation_url = f"itms-services://?action=download-manifest&url={request.host_url}manifest/{os.path.basename(manifest_path)}"
-        signed_app.icon_url = icon_url
-        signed_app.full_size_icon_url = full_size_icon_url
-        
-        db.session.add(signed_app)
-        db.session.commit()
-        
-        flash('App signed successfully')
-    else:
-        flash('Error signing app: ' + signed_path)
+            signed_app = SignedApp()
+            signed_app.user_id = current_user.id
+            signed_app.app_name = os.path.basename(ipa_path)
+            signed_app.bundle_id = bundle_id
+            signed_app.ipa_path = result
+            signed_app.plist_path = manifest_path
+            signed_app.installation_url = f"itms-services://?action=download-manifest&url={request.host_url}manifest/{os.path.basename(manifest_path)}"
+            signed_app.icon_url = icon_url
+            signed_app.full_size_icon_url = full_size_icon_url
+            
+            db.session.add(signed_app)
+            db.session.commit()
+            
+            flash('App signed successfully')
+        else:
+            flash(f'Error signing app: {str(result)}')  # Convert to string explicitly
+
+    except Exception as e:
+        flash(f'Signing process failed: {str(e)}')  # Convert to string explicitly
 
     return redirect(url_for('dashboard'))
 
@@ -140,7 +184,7 @@ def logout():
 def serve_manifest(filename):
     return send_file(
         os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], filename),
-        mimetype='application/xml'  # Changed from application/x-plist
+        mimetype='application/xml'
     )
 
 @app.route('/download/<filename>')
@@ -150,6 +194,10 @@ def download_file(filename):
         mime_type = 'image/png'
     elif filename.endswith('.jpg') or filename.endswith('.jpeg'):
         mime_type = 'image/jpeg'
+    elif filename.endswith('.plist'):
+        mime_type = 'application/xml'
+    elif filename.endswith('.ipa'):
+        mime_type = 'application/octet-stream'
     
     return send_file(
         os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], filename),
