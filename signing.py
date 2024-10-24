@@ -11,6 +11,7 @@ class IPASigner:
         self.p12_path = p12_path
         self.provision_path = provision_path
         self.p12_password = p12_password
+        self.device_udids = []  # List of device UDIDs to include in signing
 
     def get_cert_info(self):
         try:
@@ -46,10 +47,43 @@ class IPASigner:
         except Exception as e:
             raise Exception(f'Failed to extract bundle ID: {str(e)}')
 
+    def modify_provisioning_profile(self):
+        try:
+            with open(self.provision_path, 'rb') as f:
+                content = f.read()
+                start = content.find(b'<?xml')
+                end = content.find(b'</plist>') + 8
+                plist_data = plistlib.loads(content[start:end])
+                
+                # Add device UDIDs to provisioning profile
+                if 'ProvisionedDevices' in plist_data:
+                    existing_devices = set(plist_data['ProvisionedDevices'])
+                    new_devices = set(self.device_udids)
+                    plist_data['ProvisionedDevices'] = list(existing_devices.union(new_devices))
+                else:
+                    plist_data['ProvisionedDevices'] = self.device_udids
+
+                # Create temporary provisioning profile with updated devices
+                temp_provision = tempfile.mktemp(suffix='.mobileprovision')
+                with open(temp_provision, 'wb') as f:
+                    f.write(content[:start])
+                    f.write(plistlib.dumps(plist_data))
+                    f.write(content[end:])
+                
+                return temp_provision
+        except Exception as e:
+            raise Exception(f'Failed to modify provisioning profile: {str(e)}')
+
     def sign_ipa(self):
         temp_dir = None
+        temp_provision = None
         try:
             temp_dir = tempfile.mkdtemp()
+            
+            # Modify provisioning profile with device UDIDs
+            if self.device_udids:
+                temp_provision = self.modify_provisioning_profile()
+                self.provision_path = temp_provision
             
             # Extract IPA
             ipa_extract_path = os.path.join(temp_dir, 'ipa_contents')
@@ -104,6 +138,8 @@ class IPASigner:
             # Cleanup
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
+            if temp_provision and os.path.exists(temp_provision):
+                os.remove(temp_provision)
 
     @staticmethod
     def generate_manifest(bundle_id, app_url, title, version='1.0'):

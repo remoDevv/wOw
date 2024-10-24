@@ -4,7 +4,7 @@ from flask_login import login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from app import app, db
-from models import User, SignedApp
+from models import User, SignedApp, Device
 from signing import IPASigner
 
 @app.route('/')
@@ -45,6 +45,57 @@ def dashboard():
     apps = SignedApp.query.filter_by(user_id=current_user.id).all()
     return render_template('dashboard.html', apps=apps)
 
+@app.route('/devices', methods=['GET'])
+@login_required
+def devices():
+    user_devices = Device.query.filter_by(user_id=current_user.id).all()
+    return render_template('devices.html', devices=user_devices)
+
+@app.route('/devices/add', methods=['POST'])
+@login_required
+def add_device():
+    name = request.form.get('name')
+    udid = request.form.get('udid')
+    
+    if not name or not udid:
+        flash('Device name and UDID are required')
+        return redirect(url_for('devices'))
+        
+    if len(udid) != 40 or not all(c in '0123456789ABCDEFabcdef' for c in udid):
+        flash('Invalid UDID format')
+        return redirect(url_for('devices'))
+        
+    existing_device = Device.query.filter_by(user_id=current_user.id, udid=udid).first()
+    if existing_device:
+        flash('This device is already registered')
+        return redirect(url_for('devices'))
+        
+    device = Device(name=name, udid=udid, user_id=current_user.id)
+    db.session.add(device)
+    
+    try:
+        db.session.commit()
+        flash('Device added successfully')
+    except Exception as e:
+        db.session.rollback()
+        flash('Error adding device')
+        
+    return redirect(url_for('devices'))
+
+@app.route('/devices/remove/<int:device_id>', methods=['POST'])
+@login_required
+def remove_device(device_id):
+    device = Device.query.filter_by(id=device_id, user_id=current_user.id).first()
+    
+    if device:
+        db.session.delete(device)
+        db.session.commit()
+        flash('Device removed successfully')
+    else:
+        flash('Device not found')
+        
+    return redirect(url_for('devices'))
+
 @app.route('/sign', methods=['POST'])
 @login_required
 def sign_app():
@@ -69,14 +120,20 @@ def sign_app():
     p12_file.save(p12_path)
     provision_file.save(provision_path)
 
+    # Get user's devices
+    devices = Device.query.filter_by(user_id=current_user.id).all()
+    device_udids = [device.udid for device in devices]
+
     # Sign IPA
     signer = IPASigner(ipa_path, p12_path, provision_path, p12_password)
+    signer.device_udids = device_udids  # Add device UDIDs to signer
     success, signed_path = signer.sign_ipa()
 
     if success:
         # Create manifest and save app
         app_url = request.host_url + 'download/' + os.path.basename(signed_path)
-        manifest = IPASigner.generate_manifest('com.example.app', app_url, 'Signed App')
+        bundle_id = signer.extract_bundle_id()
+        manifest = IPASigner.generate_manifest(bundle_id, app_url, 'Signed App')
         
         manifest_path = os.path.join(upload_dir, 'manifest_' + os.path.basename(signed_path) + '.plist')
         with open(manifest_path, 'wb') as f:
@@ -85,7 +142,7 @@ def sign_app():
         signed_app = SignedApp(
             user_id=current_user.id,
             app_name=os.path.basename(ipa_path),
-            bundle_id='com.example.app',
+            bundle_id=bundle_id,
             ipa_path=signed_path,
             plist_path=manifest_path,
             installation_url=f"itms-services://?action=download-manifest&url={request.host_url}manifest/{os.path.basename(manifest_path)}"
