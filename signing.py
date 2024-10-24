@@ -28,61 +28,87 @@ class IPASigner:
             print(f"Warning: Cleanup failed: {str(e)}")
 
     def extract_certificate(self):
-        """Extract certificate from P12 file with legacy algorithm support"""
+        """Extract certificate from P12 file with enhanced compatibility"""
         try:
             if self.temp_dir is None:
                 self.temp_dir = tempfile.mkdtemp()
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
             
-            # First try with legacy algorithms enabled
-            cmd = [
-                'openssl', 'pkcs12',
-                '-in', self.p12_path,
-                '-passin', f'pass:{self.p12_password}',
-                '-legacy',  # Add legacy algorithm support
-                '-clcerts',
-                '-nokeys',
-                '-out', self.cert_path
+            # Try different OpenSSL commands with various options
+            commands = [
+                # Try with legacy and no password first
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
+                 '-out', self.cert_path, '-nodes', '-legacy'],
+                
+                # Try with password and legacy
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
+                 '-out', self.cert_path, '-passin', f'pass:{self.p12_password}', '-legacy'],
+                 
+                # Try with default algorithms
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
+                 '-out', self.cert_path, '-passin', f'pass:{self.p12_password}'],
+                 
+                # Try with nodes option
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
+                 '-out', self.cert_path, '-nodes', '-passin', f'pass:{self.p12_password}']
             ]
             
-            try:
-                subprocess.run(cmd, check=True, capture_output=True)
-            except subprocess.CalledProcessError:
-                # If legacy mode fails, try without it
-                cmd.remove('-legacy')
-                subprocess.run(cmd, check=True, capture_output=True)
+            last_error = None
+            for cmd in commands:
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    return True
+                except subprocess.CalledProcessError as e:
+                    last_error = e
+                    continue
+                    
+            if last_error:
+                raise ValueError(f'All certificate extraction attempts failed: {last_error.stderr}')
                 
             return True
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f'Failed to extract certificate: {e.stderr}')
+        except Exception as e:
+            raise ValueError(f'Failed to extract certificate: {str(e)}')
 
     def extract_private_key(self):
-        """Extract private key from P12 certificate with legacy algorithm support"""
+        """Extract private key from P12 certificate with enhanced compatibility"""
         try:
             if self.temp_dir is None:
                 self.temp_dir = tempfile.mkdtemp()
             self.key_path = os.path.join(self.temp_dir, 'private.key')
             
-            cmd = [
-                'openssl', 'pkcs12',
-                '-in', self.p12_path,
-                '-passin', f'pass:{self.p12_password}',
-                '-legacy',  # Add legacy algorithm support
-                '-nocerts',
-                '-nodes',
-                '-out', self.key_path
+            commands = [
+                # Try with legacy and no password
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts',
+                 '-out', self.key_path, '-nodes', '-legacy'],
+                
+                # Try with password and legacy
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts',
+                 '-out', self.key_path, '-passin', f'pass:{self.p12_password}', '-legacy'],
+                 
+                # Try with default algorithms
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts',
+                 '-out', self.key_path, '-passin', f'pass:{self.p12_password}'],
+                 
+                # Try with nodes option
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts',
+                 '-out', self.key_path, '-nodes', '-passin', f'pass:{self.p12_password}']
             ]
             
-            try:
-                subprocess.run(cmd, check=True, capture_output=True)
-            except subprocess.CalledProcessError:
-                # If legacy mode fails, try without it
-                cmd.remove('-legacy')
-                subprocess.run(cmd, check=True, capture_output=True)
+            last_error = None
+            for cmd in commands:
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    return True
+                except subprocess.CalledProcessError as e:
+                    last_error = e
+                    continue
+                    
+            if last_error:
+                raise ValueError(f'All private key extraction attempts failed: {last_error.stderr}')
                 
             return True
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f'Failed to extract private key: {e.stderr}')
+        except Exception as e:
+            raise ValueError(f'Failed to extract private key: {str(e)}')
 
     def get_cert_info(self):
         """Extract and validate certificate information"""
@@ -90,7 +116,6 @@ class IPASigner:
             if not self.cert_path:
                 self.extract_certificate()
             
-            # Get certificate subject
             result = subprocess.run([
                 'openssl', 'x509',
                 '-in', self.cert_path,
