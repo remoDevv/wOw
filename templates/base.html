@@ -8,19 +8,43 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
         <div class="container">
             <a class="navbar-brand" href="{{ url_for('dashboard') }}">IPA Signer</a>
+            
             {% if current_user.is_authenticated %}
-            <div class="navbar-nav ms-auto">
-                <span class="nav-item nav-link">Welcome, {{ current_user.username }}</span>
-                <a class="nav-item nav-link" href="{{ url_for('logout') }}">Logout</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" 
+                    data-bs-target="#navbarContent" aria-controls="navbarContent" 
+                    aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+
+            <div class="collapse navbar-collapse" id="navbarContent">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('devices') }}">Manage Devices</a>
+                    </li>
+                </ul>
+                <div class="navbar-nav">
+                    <div class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" role="button" 
+                           data-bs-toggle="dropdown" aria-expanded="false">
+                            {{ current_user.username }}
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                            <li><a class="dropdown-item" href="{{ url_for('logout') }}">Logout</a></li>
+                        </ul>
+                    </div>
+                </div>
             </div>
             {% endif %}
         </div>
     </nav>
 
-    <div class="container mt-4">
+    <div class="container">
         {% with messages = get_flashed_messages() %}
             {% if messages %}
                 {% for message in messages %}
