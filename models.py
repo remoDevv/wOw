@@ -17,3 +17,5 @@ class SignedApp(db.Model):
     plist_path = db.Column(db.String(256), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     installation_url = db.Column(db.String(512), nullable=False)
+    icon_url = db.Column(db.String(512))
+    full_size_icon_url = db.Column(db.String(512))

@@ -136,7 +136,6 @@ class IPASigner:
     def sign_ipa(self):
         """Sign IPA file using OpenSSL"""
         try:
-            # Input validation
             if not all(os.path.exists(p) for p in [self.app_path, self.p12_path, self.provision_path]):
                 raise ValueError('One or more input files do not exist')
             if not self.app_path.endswith('.ipa'):
@@ -149,9 +148,8 @@ class IPASigner:
 
             # Extract IPA
             try:
-                subprocess.run([
-                    'unzip', '-qq', self.app_path, '-d', ipa_extract_path
-                ], check=True, capture_output=True)
+                subprocess.run(['unzip', '-qq', self.app_path, '-d', ipa_extract_path], 
+                             check=True, capture_output=True)
             except subprocess.CalledProcessError as e:
                 raise ValueError(f'Failed to extract IPA: {e.stderr}')
 
@@ -201,9 +199,8 @@ class IPASigner:
             current_dir = os.getcwd()
             try:
                 os.chdir(ipa_extract_path)
-                subprocess.run([
-                    'zip', '-qr', output_path, 'Payload'
-                ], check=True, capture_output=True)
+                subprocess.run(['zip', '-qr', output_path, 'Payload'], 
+                             check=True, capture_output=True)
             finally:
                 os.chdir(current_dir)
 
@@ -216,7 +213,7 @@ class IPASigner:
             self.cleanup()
 
     @staticmethod
-    def generate_manifest(bundle_id, app_url, title, version='1.0'):
+    def generate_manifest(bundle_id, app_url, title, icon_url=None, full_size_icon_url=None, version='1.0'):
         """Generate manifest file for OTA installation"""
         manifest = {
             'items': [{
@@ -233,5 +230,19 @@ class IPASigner:
                 }
             }]
         }
+        
+        # Add icons if provided
+        if icon_url:
+            manifest['items'][0]['assets'].append({
+                'kind': 'display-image',
+                'url': icon_url,
+                'needs-shine': True
+            })
+        if full_size_icon_url:
+            manifest['items'][0]['assets'].append({
+                'kind': 'full-size-image',
+                'url': full_size_icon_url,
+                'needs-shine': True
+            })
         
         return plistlib.dumps(manifest)

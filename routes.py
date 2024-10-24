@@ -72,6 +72,25 @@ def sign_app():
     p12_file.save(p12_path)
     provision_file.save(provision_path)
 
+    # Handle optional icon uploads
+    icon = request.files.get('icon')
+    full_size_icon = request.files.get('full_size_icon')
+    
+    icon_url = None
+    full_size_icon_url = None
+    
+    if icon:
+        icon_filename = secure_filename(icon.filename)
+        icon_path = os.path.join(upload_dir, icon_filename)
+        icon.save(icon_path)
+        icon_url = request.host_url + 'download/' + icon_filename
+        
+    if full_size_icon:
+        full_size_filename = secure_filename(full_size_icon.filename)
+        full_size_path = os.path.join(upload_dir, full_size_filename)
+        full_size_icon.save(full_size_path)
+        full_size_icon_url = request.host_url + 'download/' + full_size_filename
+
     # Sign IPA
     signer = IPASigner(ipa_path, p12_path, provision_path, p12_password)
     success, signed_path = signer.sign_ipa()
@@ -80,7 +99,13 @@ def sign_app():
         # Create manifest and save app
         app_url = request.host_url + 'download/' + os.path.basename(signed_path)
         bundle_id = signer.extract_bundle_id()
-        manifest = IPASigner.generate_manifest(bundle_id, app_url, 'Signed App')
+        manifest = IPASigner.generate_manifest(
+            bundle_id,
+            app_url,
+            'Signed App',
+            icon_url,
+            full_size_icon_url
+        )
         
         manifest_path = os.path.join(upload_dir, 'manifest_' + os.path.basename(signed_path) + '.plist')
         with open(manifest_path, 'wb') as f:
@@ -93,6 +118,8 @@ def sign_app():
         signed_app.ipa_path = signed_path
         signed_app.plist_path = manifest_path
         signed_app.installation_url = f"itms-services://?action=download-manifest&url={request.host_url}manifest/{os.path.basename(manifest_path)}"
+        signed_app.icon_url = icon_url
+        signed_app.full_size_icon_url = full_size_icon_url
         
         db.session.add(signed_app)
         db.session.commit()
@@ -113,13 +140,19 @@ def logout():
 def serve_manifest(filename):
     return send_file(
         os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], filename),
-        mimetype='application/x-plist'
+        mimetype='application/xml'  # Changed from application/x-plist
     )
 
 @app.route('/download/<filename>')
 def download_file(filename):
+    mime_type = 'application/octet-stream'
+    if filename.endswith('.png'):
+        mime_type = 'image/png'
+    elif filename.endswith('.jpg') or filename.endswith('.jpeg'):
+        mime_type = 'image/jpeg'
+    
     return send_file(
         os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], filename),
-        mimetype='application/octet-stream',
-        as_attachment=True
+        mimetype=mime_type,
+        as_attachment=True if mime_type == 'application/octet-stream' else False
     )
