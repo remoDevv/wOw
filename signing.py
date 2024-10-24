@@ -110,26 +110,12 @@ class IPASigner:
         except Exception as e:
             raise ValueError(f'Failed to extract private key: {str(e)}')
 
-    def get_cert_info(self):
-        """Extract and validate certificate information"""
-        try:
-            if not self.cert_path:
-                self.extract_certificate()
-            
-            result = subprocess.run([
-                'openssl', 'x509',
-                '-in', self.cert_path,
-                '-subject',
-                '-noout'
-            ], capture_output=True, text=True, check=True)
-            
-            subject = result.stdout.strip()
-            if 'iPhone' not in subject and 'iOS' not in subject:
-                raise ValueError('Not a valid iOS signing certificate')
-                
-            return subject
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f'Failed to read certificate: {e.stderr}')
+    def verify_file_exists(self, file_path, description):
+        """Verify file existence and type"""
+        if not os.path.exists(file_path):
+            raise ValueError(f'{description} not found: {file_path}')
+        if not os.path.isfile(file_path):
+            raise ValueError(f'{description} is not a file: {file_path}')
 
     def extract_bundle_id(self):
         """Extract bundle ID from provisioning profile"""
@@ -153,16 +139,49 @@ class IPASigner:
     @staticmethod
     def is_binary_file(file_path):
         """Check if a file is binary"""
-        try:
-            with open(file_path, 'rb') as f:
-                chunk = f.read(1024)
-                return b'\x00' in chunk
-        except Exception:
+        # Skip known non-binary files
+        skip_extensions = {
+            '.strings', '.plist', '.nib', '.mom', 
+            '.ttf', '.png', '.jpg', '.jpeg', '.gif',
+            '.css', '.js', '.html', '.json', '.xml',
+            '.txt', '.md', '.csv', '.mobileprovision'
+        }
+        if any(file_path.lower().endswith(ext) for ext in skip_extensions):
             return False
+            
+        try:
+            # Check if file is Mach-O binary
+            result = subprocess.run(
+                ['file', file_path],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            return 'Mach-O' in result.stdout
+        except:
+            # Fallback to basic binary check
+            try:
+                with open(file_path, 'rb') as f:
+                    chunk = f.read(1024)
+                    return b'\x00' in chunk
+            except:
+                return False
 
     def sign_binary(self, file_path):
-        """Sign a binary file using OpenSSL"""
+        """Sign a binary file using OpenSSL with improved error handling"""
         try:
+            # Skip non-binary files
+            if not self.is_binary_file(file_path):
+                return False
+                
+            binary_name = os.path.basename(file_path)
+            print(f"Signing binary: {binary_name}")
+            
+            # Verify all required files exist
+            self.verify_file_exists(self.cert_path, "Certificate")
+            self.verify_file_exists(self.key_path, "Private key")
+            self.verify_file_exists(file_path, "Binary file")
+            
             sig_path = file_path + '.sig'
             cmd = [
                 'openssl', 'cms',
@@ -174,90 +193,136 @@ class IPASigner:
                 '-outform', 'DER',
                 '-out', sig_path
             ]
-            subprocess.run(cmd, check=True, capture_output=True)
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            print(f"Successfully signed {binary_name}")
             return True
+            
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to sign {os.path.basename(file_path)}: {e.stderr}")
+            return False
         except Exception as e:
-            print(f"Warning: Failed to sign binary {file_path}: {str(e)}")
+            print(f"Error signing {os.path.basename(file_path)}: {str(e)}")
             return False
 
     def sign_ipa(self):
-        """Sign IPA file using OpenSSL"""
         try:
-            if not all(os.path.exists(p) for p in [self.app_path, self.p12_path, self.provision_path]):
-                raise ValueError('One or more input files do not exist')
-            if not self.app_path.endswith('.ipa'):
-                raise ValueError('Invalid IPA file')
-
-            # Create temporary directory
+            print("Starting IPA signing process...")
+            
+            # Validate input files
+            if not os.path.exists(self.app_path):
+                raise ValueError(f"IPA file not found: {self.app_path}")
+            if not os.path.exists(self.p12_path):
+                raise ValueError(f"P12 certificate not found: {self.p12_path}")
+            if not os.path.exists(self.provision_path):
+                raise ValueError(f"Provisioning profile not found: {self.provision_path}")
+                
+            # Create temp directory
             self.temp_dir = tempfile.mkdtemp()
+            print(f"Created temporary directory: {self.temp_dir}")
+            
+            # Extract IPA
             ipa_extract_path = os.path.join(self.temp_dir, 'ipa_contents')
             os.makedirs(ipa_extract_path)
-
-            # Extract IPA
-            try:
-                subprocess.run(['unzip', '-qq', self.app_path, '-d', ipa_extract_path], 
-                             check=True, capture_output=True)
-            except subprocess.CalledProcessError as e:
-                raise ValueError(f'Failed to extract IPA: {e.stderr}')
-
-            # Find .app directory
-            payload_path = os.path.join(ipa_extract_path, 'Payload')
-            if not os.path.exists(payload_path):
-                raise ValueError('Invalid IPA structure: No Payload directory')
+            print("Extracting IPA...")
             
+            try:
+                subprocess.run(['unzip', '-q', self.app_path, '-d', ipa_extract_path], check=True)
+                print("IPA extracted successfully")
+            except subprocess.CalledProcessError as e:
+                raise ValueError(f"Failed to extract IPA: {e}")
+                
+            # Find main app bundle
             app_dir = None
-            for item in os.listdir(payload_path):
-                if item.endswith('.app'):
-                    app_dir = os.path.join(payload_path, item)
+            for root, dirs, _ in os.walk(os.path.join(ipa_extract_path, 'Payload')):
+                for dir in dirs:
+                    if dir.endswith('.app'):
+                        app_dir = os.path.join(root, dir)
+                        break
+                if app_dir:
                     break
+                    
             if not app_dir:
-                raise ValueError('No .app bundle found in IPA')
-
+                raise ValueError("No .app bundle found in IPA")
+                
+            print(f"Found app bundle: {app_dir}")
+            
+            # Copy provisioning profile
+            prov_dest = os.path.join(app_dir, 'embedded.mobileprovision')
+            shutil.copy2(self.provision_path, prov_dest)
+            print("Copied provisioning profile")
+            
             # Extract certificate and private key
+            print("Extracting certificate and private key...")
             self.extract_certificate()
             self.extract_private_key()
-
-            # Copy provisioning profile
-            shutil.copy2(self.provision_path, os.path.join(app_dir, 'embedded.mobileprovision'))
-
-            # Sign the application binaries
-            signed_count = 0
-            for root, _, files in os.walk(app_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    if self.is_binary_file(file_path):
-                        if self.sign_binary(file_path):
-                            signed_count += 1
-
-            if signed_count == 0:
-                print("Warning: No binary files were signed")
-            else:
-                print(f"Successfully signed {signed_count} binary files")
-
-            # Create output directory if it doesn't exist
-            output_dir = os.path.join(os.path.dirname(self.app_path), 'signed')
-            os.makedirs(output_dir, exist_ok=True)
-
-            # Create signed IPA
-            output_filename = 'signed_' + secure_filename(os.path.basename(self.app_path))
+            print("Certificate and private key extracted successfully")
+            
+            # Find main executable
+            executable = None
+            info_plist_path = os.path.join(app_dir, 'Info.plist')
+            if os.path.exists(info_plist_path):
+                try:
+                    with open(info_plist_path, 'rb') as f:
+                        info_plist = plistlib.load(f)
+                        executable = info_plist.get('CFBundleExecutable')
+                        if executable:
+                            executable = os.path.join(app_dir, executable)
+                except:
+                    pass
+                    
+            if not executable or not os.path.exists(executable):
+                print("Warning: Could not find main executable from Info.plist")
+                # Try to find the main executable manually
+                for file in os.listdir(app_dir):
+                    if not file.endswith(('.plist', '.mobileprovision', '.png', '.jpg')):
+                        possible_exec = os.path.join(app_dir, file)
+                        if os.path.isfile(possible_exec) and os.access(possible_exec, os.X_OK):
+                            executable = possible_exec
+                            break
+                            
+            if not executable:
+                raise ValueError("Could not find main executable")
+                
+            print(f"Found main executable: {executable}")
+            
+            # Sign the main executable
+            if not self.sign_binary(executable):
+                raise ValueError("Failed to sign main executable")
+            
+            # Create signed output
+            output_dir = os.path.dirname(self.app_path)
+            output_filename = 'signed_' + os.path.basename(self.app_path)
             output_path = os.path.join(output_dir, output_filename)
             
-            # Create new IPA
+            print("Creating signed IPA...")
             current_dir = os.getcwd()
             try:
                 os.chdir(ipa_extract_path)
-                subprocess.run(['zip', '-qr', output_path, 'Payload'], 
-                             check=True, capture_output=True)
+                subprocess.run(['zip', '-qr', output_path, 'Payload'], check=True)
+                print(f"Created signed IPA: {output_path}")
             finally:
                 os.chdir(current_dir)
-
+                
             return True, output_path
-
+            
         except Exception as e:
+            print(f"Error during signing: {str(e)}")
             return False, str(e)
-
+            
         finally:
-            self.cleanup()
+            if self.temp_dir and os.path.exists(self.temp_dir):
+                try:
+                    shutil.rmtree(self.temp_dir)
+                    print("Cleaned up temporary directory")
+                except:
+                    print("Warning: Failed to clean up temporary directory")
 
     @staticmethod
     def generate_manifest(bundle_id, app_url, title, icon_url=None, full_size_icon_url=None, version='1.0'):
