@@ -34,81 +34,70 @@ class IPASigner:
                 self.temp_dir = tempfile.mkdtemp()
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
             
-            # Try different OpenSSL commands with various options
-            commands = [
-                # Try with legacy and no password first
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                 '-out', self.cert_path, '-nodes', '-legacy'],
-                
-                # Try with password and legacy
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                 '-out', self.cert_path, '-passin', f'pass:{self.p12_password}', '-legacy'],
-                 
-                # Try with default algorithms
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                 '-out', self.cert_path, '-passin', f'pass:{self.p12_password}'],
-                 
-                # Try with nodes option
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                 '-out', self.cert_path, '-nodes', '-passin', f'pass:{self.p12_password}']
-            ]
+            # Write password to temp file to avoid command line exposure
+            pwd_path = os.path.join(self.temp_dir, 'pwd.txt')
+            with open(pwd_path, 'w') as f:
+                f.write(self.p12_password)
             
-            last_error = None
-            for cmd in commands:
-                try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True)
-                    return True
-                except subprocess.CalledProcessError as e:
-                    last_error = e
-                    continue
-                    
-            if last_error:
-                raise ValueError(f'All certificate extraction attempts failed: {last_error.stderr}')
+            try:
+                # Extract certificate using password file
+                subprocess.run([
+                    'openssl', 'pkcs12',
+                    '-in', self.p12_path,
+                    '-clcerts', '-nokeys',
+                    '-out', self.cert_path,
+                    '-passin', f'file:{pwd_path}'
+                ], check=True, capture_output=True, text=True)
                 
-            return True
+                return True
+                
+            finally:
+                # Always remove password file
+                if os.path.exists(pwd_path):
+                    os.remove(pwd_path)
+                    
+        except subprocess.CalledProcessError as e:
+            print(f"Certificate extraction failed: {e.stderr}")
+            raise ValueError(f'Failed to extract certificate: {e.stderr}')
         except Exception as e:
-            raise ValueError(f'Failed to extract certificate: {str(e)}')
+            print(f"Certificate extraction error: {str(e)}")
+            raise ValueError(f'Certificate extraction error: {str(e)}')
 
     def extract_private_key(self):
-        """Extract private key from P12 certificate with enhanced compatibility"""
+        """Extract private key from P12 file with enhanced compatibility"""
         try:
             if self.temp_dir is None:
                 self.temp_dir = tempfile.mkdtemp()
             self.key_path = os.path.join(self.temp_dir, 'private.key')
             
-            commands = [
-                # Try with legacy and no password
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts',
-                 '-out', self.key_path, '-nodes', '-legacy'],
-                
-                # Try with password and legacy
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts',
-                 '-out', self.key_path, '-passin', f'pass:{self.p12_password}', '-legacy'],
-                 
-                # Try with default algorithms
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts',
-                 '-out', self.key_path, '-passin', f'pass:{self.p12_password}'],
-                 
-                # Try with nodes option
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts',
-                 '-out', self.key_path, '-nodes', '-passin', f'pass:{self.p12_password}']
-            ]
+            # Write password to temp file to avoid command line exposure
+            pwd_path = os.path.join(self.temp_dir, 'pwd.txt')
+            with open(pwd_path, 'w') as f:
+                f.write(self.p12_password)
             
-            last_error = None
-            for cmd in commands:
-                try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True)
-                    return True
-                except subprocess.CalledProcessError as e:
-                    last_error = e
-                    continue
-                    
-            if last_error:
-                raise ValueError(f'All private key extraction attempts failed: {last_error.stderr}')
+            try:
+                # Extract private key using password file
+                subprocess.run([
+                    'openssl', 'pkcs12',
+                    '-in', self.p12_path,
+                    '-nocerts', '-nodes',
+                    '-out', self.key_path,
+                    '-passin', f'file:{pwd_path}'
+                ], check=True, capture_output=True, text=True)
                 
-            return True
+                return True
+                
+            finally:
+                # Always remove password file
+                if os.path.exists(pwd_path):
+                    os.remove(pwd_path)
+                    
+        except subprocess.CalledProcessError as e:
+            print(f"Private key extraction failed: {e.stderr}")
+            raise ValueError(f'Failed to extract private key: {e.stderr}')
         except Exception as e:
-            raise ValueError(f'Failed to extract private key: {str(e)}')
+            print(f"Private key extraction error: {str(e)}")
+            raise ValueError(f'Private key extraction error: {str(e)}')
 
     def verify_file_exists(self, file_path, description):
         """Verify file existence and type"""
@@ -212,6 +201,7 @@ class IPASigner:
             return False
 
     def sign_ipa(self):
+        """Sign IPA file with enhanced error handling and Linux compatibility"""
         try:
             print("Starting IPA signing process...")
             
@@ -307,22 +297,14 @@ class IPASigner:
                 os.chdir(ipa_extract_path)
                 subprocess.run(['zip', '-qr', output_path, 'Payload'], check=True)
                 print(f"Created signed IPA: {output_path}")
+                return True, output_path
             finally:
                 os.chdir(current_dir)
+                self.cleanup()
                 
-            return True, output_path
-            
         except Exception as e:
             print(f"Error during signing: {str(e)}")
             return False, str(e)
-            
-        finally:
-            if self.temp_dir and os.path.exists(self.temp_dir):
-                try:
-                    shutil.rmtree(self.temp_dir)
-                    print("Cleaned up temporary directory")
-                except:
-                    print("Warning: Failed to clean up temporary directory")
 
     @staticmethod
     def generate_manifest(bundle_id, app_url, title, icon_url=None, full_size_icon_url=None, version='1.0'):
