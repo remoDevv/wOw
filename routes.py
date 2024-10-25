@@ -52,57 +52,11 @@ def dashboard():
                     os.remove(app.ipa_path)
                 if os.path.exists(app.plist_path):
                     os.remove(app.plist_path)
-                if app.icon_url:
-                    icon_path = os.path.join(current_app.root_path, 'static/uploads', 
-                                           os.path.basename(app.icon_url))
-                    if os.path.exists(icon_path):
-                        os.remove(icon_path)
-                if app.full_size_icon_url:
-                    icon_path = os.path.join(current_app.root_path, 'static/uploads', 
-                                           os.path.basename(app.full_size_icon_url))
-                    if os.path.exists(icon_path):
-                        os.remove(icon_path)
                 db.session.delete(app)
             except Exception as e:
                 print(f"Error deleting expired files: {e}")
     db.session.commit()
     return render_template('dashboard.html', apps=apps, now=datetime.utcnow())
-
-def validate_icon(icon_file, max_size, expected_size):
-    """Validate icon file size and dimensions"""
-    from PIL import Image
-    import io
-    
-    if not icon_file or not icon_file.filename:
-        return True, None
-        
-    # Check file size
-    icon_file.seek(0, os.SEEK_END)
-    size = icon_file.tell()
-    icon_file.seek(0)
-    
-    if size > max_size:
-        return False, f'Icon file too large (max {max_size/1024/1024}MB)'
-        
-    # Check dimensions
-    try:
-        img = Image.open(icon_file)
-        if img.size != (expected_size, expected_size):
-            return False, f'Icon must be {expected_size}x{expected_size} pixels'
-        icon_file.seek(0)
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-def save_icon(icon_file, upload_dir):
-    """Save icon file and return URL"""
-    if not icon_file or not icon_file.filename:
-        return None
-        
-    icon_filename = secure_filename(icon_file.filename)
-    icon_path = os.path.join(upload_dir, icon_filename)
-    icon_file.save(icon_path)
-    return request.host_url + 'download/' + icon_filename
 
 @app.route('/sign', methods=['POST'])
 @login_required
@@ -134,27 +88,6 @@ def sign_app():
     p12_file.save(p12_path)
     provision_file.save(provision_path)
 
-    # Handle optional icons with validation
-    icon = request.files.get('icon')
-    full_size_icon = request.files.get('full_size_icon')
-    
-    icon_url = None
-    full_size_icon_url = None
-    
-    if icon:
-        valid, error = validate_icon(icon, 1024*1024, 57)  # 1MB max, 57x57 pixels
-        if not valid and error:
-            flash(str(error))
-            return redirect(url_for('dashboard'))
-        icon_url = save_icon(icon, upload_dir)
-        
-    if full_size_icon:
-        valid, error = validate_icon(full_size_icon, 2*1024*1024, 512)  # 2MB max, 512x512 pixels
-        if not valid and error:
-            flash(str(error))
-            return redirect(url_for('dashboard'))
-        full_size_icon_url = save_icon(full_size_icon, upload_dir)
-
     # Sign IPA
     try:
         signer = IPASigner(ipa_path, p12_path, provision_path, p12_password)
@@ -167,9 +100,7 @@ def sign_app():
             manifest = IPASigner.generate_manifest(
                 bundle_id,
                 app_url,
-                'Signed App',
-                icon_url,
-                full_size_icon_url
+                'Signed App'
             )
             
             manifest_path = os.path.join(upload_dir, 'manifest_' + os.path.basename(result) + '.plist')
@@ -183,8 +114,6 @@ def sign_app():
             signed_app.ipa_path = result
             signed_app.plist_path = manifest_path
             signed_app.installation_url = f"itms-services://?action=download-manifest&url={request.host_url}manifest/{os.path.basename(manifest_path)}"
-            signed_app.icon_url = icon_url
-            signed_app.full_size_icon_url = full_size_icon_url
             # Set fixed 30-day expiration
             signed_app.expiration_date = datetime.utcnow() + timedelta(days=30)
             
@@ -236,28 +165,20 @@ def download_file(filename):
     if current_user.is_authenticated:
         app = SignedApp.query.filter(
             SignedApp.user_id == current_user.id,
-            (SignedApp.ipa_path == upload_path) | 
-            (SignedApp.icon_url.contains(filename)) | 
-            (SignedApp.full_size_icon_url.contains(filename))
+            SignedApp.ipa_path == upload_path
         ).first()
     else:
         app = SignedApp.query.filter(
             SignedApp.is_public == True,
             SignedApp.expiration_date > datetime.utcnow(),
-            (SignedApp.ipa_path == upload_path) | 
-            (SignedApp.icon_url.contains(filename)) | 
-            (SignedApp.full_size_icon_url.contains(filename))
+            SignedApp.ipa_path == upload_path
         ).first()
     
     if not app:
         abort(404)
     
     mime_type = 'application/octet-stream'
-    if filename.endswith('.png'):
-        mime_type = 'image/png'
-    elif filename.endswith('.jpg') or filename.endswith('.jpeg'):
-        mime_type = 'image/jpeg'
-    elif filename.endswith('.plist'):
+    if filename.endswith('.plist'):
         mime_type = 'application/xml'
     elif filename.endswith('.ipa'):
         mime_type = 'application/octet-stream'

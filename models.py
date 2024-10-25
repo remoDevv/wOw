@@ -20,8 +20,6 @@ class SignedApp(db.Model):
     plist_path = db.Column(db.String(256), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     installation_url = db.Column(db.String(512), nullable=False)
-    icon_url = db.Column(db.String(512))
-    full_size_icon_url = db.Column(db.String(512))
     expiration_date = db.Column(db.DateTime, nullable=False, default=lambda: datetime.utcnow() + timedelta(days=30))
     share_token = db.Column(db.String(64), unique=True, default=lambda: str(uuid.uuid4()))
     is_public = db.Column(db.Boolean, default=False)

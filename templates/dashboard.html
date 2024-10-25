@@ -25,16 +25,6 @@
                         <label for="p12_password" class="form-label">P12 Password</label>
                         <input type="password" class="form-control" id="p12_password" name="p12_password" required>
                     </div>
-                    <div class="mb-3">
-                        <label for="icon" class="form-label text-muted">App Icon (Optional)</label>
-                        <input type="file" class="form-control form-control-sm" id="icon" name="icon" accept="image/png">
-                        <div class="form-text text-muted">57x57 PNG for iPhone display (max 1MB)</div>
-                    </div>
-                    <div class="mb-3">
-                        <label for="full_size_icon" class="form-label text-muted">Full Size Icon (Optional)</label>
-                        <input type="file" class="form-control form-control-sm" id="full_size_icon" name="full_size_icon" accept="image/png">
-                        <div class="form-text text-muted">512x512 PNG for iPad display (max 2MB)</div>
-                    </div>
                     <button type="submit" class="btn btn-primary">Sign IPA</button>
                 </form>
             </div>
@@ -51,10 +41,7 @@
                 <div class="list-group">
                     {% for app in apps %}
                     <div class="list-group-item">
-                        <div class="d-flex align-items-center">
-                            {% if app.icon_url %}
-                            <img src="{{ app.icon_url }}" alt="App Icon" class="me-3" style="width: 57px; height: 57px;">
-                            {% endif %}
+                        <div class="d-flex">
                             <div class="flex-grow-1">
                                 <h5 class="mb-1">{{ app.app_name }}</h5>
                                 <p class="mb-1">Bundle ID: {{ app.bundle_id }}</p>
