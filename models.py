@@ -8,10 +8,12 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(64), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Add relationship to SignedApp
+    apps = db.relationship('SignedApp', backref='user', lazy=True, cascade='all, delete-orphan')
 
 class SignedApp(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     app_name = db.Column(db.String(128), nullable=False)
     bundle_id = db.Column(db.String(128), nullable=False)
     ipa_path = db.Column(db.String(256), nullable=False)

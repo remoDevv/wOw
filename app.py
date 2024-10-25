@@ -33,11 +33,11 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # Initialize database schema
 def init_db():
     with app.app_context():
-        import models  # Import models here to avoid circular imports
-        db.drop_all()  # Drop all existing tables
-        db.create_all()  # Create all tables from models
-
-# Initialize database on startup
+        import models
+        # Only create tables if they don't exist
+        db.create_all()
+        
+# Initialize database only if tables don't exist
 init_db()
 
 @login_manager.user_loader
