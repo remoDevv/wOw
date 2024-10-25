@@ -12,6 +12,8 @@ login_manager = LoginManager()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "a secret key"
+
+# Update database URL to use environment variables
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "pool_recycle": 300,
@@ -20,13 +22,23 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 
+# Initialize extensions
 db.init_app(app)
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-with app.app_context():
-    import models
-    db.create_all()  # Create tables if they don't exist
+# Create upload folder if it doesn't exist
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Initialize database schema
+def init_db():
+    with app.app_context():
+        import models  # Import models here to avoid circular imports
+        db.drop_all()  # Drop all existing tables
+        db.create_all()  # Create all tables from models
+
+# Initialize database on startup
+init_db()
 
 @login_manager.user_loader
 def load_user(user_id):
