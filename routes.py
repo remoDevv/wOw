@@ -52,8 +52,20 @@ def dashboard():
                     os.remove(app.ipa_path)
                 if os.path.exists(app.plist_path):
                     os.remove(app.plist_path)
+                if app.icon_url:
+                    icon_path = os.path.join(current_app.root_path, 'static/uploads', 
+                                           os.path.basename(app.icon_url))
+                    if os.path.exists(icon_path):
+                        os.remove(icon_path)
+                if app.full_size_icon_url:
+                    icon_path = os.path.join(current_app.root_path, 'static/uploads', 
+                                           os.path.basename(app.full_size_icon_url))
+                    if os.path.exists(icon_path):
+                        os.remove(icon_path)
+                db.session.delete(app)
             except Exception as e:
                 print(f"Error deleting expired files: {e}")
+    db.session.commit()
     return render_template('dashboard.html', apps=apps, now=datetime.utcnow())
 
 def validate_icon(icon_file, max_size, expected_size):
@@ -103,12 +115,6 @@ def sign_app():
     p12_file = request.files['p12']
     provision_file = request.files['provision']
     p12_password = request.form['p12_password']
-    expiration_days = int(request.form.get('expiration_days', 7))
-
-    # Validate expiration days
-    if not 1 <= expiration_days <= 30:
-        flash('Invalid expiration period. Must be between 1 and 30 days.')
-        return redirect(url_for('dashboard'))
 
     # Validate required files
     if not ipa_file.filename or not p12_file.filename or not provision_file.filename:
@@ -179,7 +185,8 @@ def sign_app():
             signed_app.installation_url = f"itms-services://?action=download-manifest&url={request.host_url}manifest/{os.path.basename(manifest_path)}"
             signed_app.icon_url = icon_url
             signed_app.full_size_icon_url = full_size_icon_url
-            signed_app.expiration_date = datetime.utcnow() + timedelta(days=expiration_days)
+            # Set fixed 30-day expiration
+            signed_app.expiration_date = datetime.utcnow() + timedelta(days=30)
             
             db.session.add(signed_app)
             db.session.commit()
@@ -268,15 +275,6 @@ def toggle_share(app_id):
     app.is_public = not app.is_public
     db.session.commit()
     flash('Sharing settings updated successfully')
-    return redirect(url_for('dashboard'))
-
-@app.route('/extend-expiration/<int:app_id>', methods=['POST'])
-@login_required
-def extend_expiration(app_id):
-    app = SignedApp.query.filter_by(id=app_id, user_id=current_user.id).first_or_404()
-    app.expiration_date = app.expiration_date + timedelta(days=7)
-    db.session.commit()
-    flash('Expiration date extended by 7 days')
     return redirect(url_for('dashboard'))
 
 @app.route('/shared/<token>')

@@ -26,10 +26,6 @@
                         <input type="password" class="form-control" id="p12_password" name="p12_password" required>
                     </div>
                     <div class="mb-3">
-                        <label for="expiration_days" class="form-label">Expiration (days)</label>
-                        <input type="number" class="form-control" id="expiration_days" name="expiration_days" value="7" min="1" max="30" required>
-                    </div>
-                    <div class="mb-3">
                         <label for="icon" class="form-label text-muted">App Icon (Optional)</label>
                         <input type="file" class="form-control form-control-sm" id="icon" name="icon" accept="image/png">
                         <div class="form-text text-muted">57x57 PNG for iPhone display (max 1MB)</div>
@@ -79,9 +75,6 @@
                                         Copy Link
                                     </button>
                                     {% endif %}
-                                    <form method="POST" action="{{ url_for('extend_expiration', app_id=app.id) }}" class="d-inline">
-                                        <button type="submit" class="btn btn-sm btn-outline-primary">+7 Days</button>
-                                    </form>
                                 </div>
                             </div>
                         </div>
