@@ -26,6 +26,10 @@
                         <input type="password" class="form-control" id="p12_password" name="p12_password" required>
                     </div>
                     <div class="mb-3">
+                        <label for="expiration_days" class="form-label">Expiration (days)</label>
+                        <input type="number" class="form-control" id="expiration_days" name="expiration_days" value="7" min="1" max="30" required>
+                    </div>
+                    <div class="mb-3">
                         <label for="icon" class="form-label text-muted">App Icon (Optional)</label>
                         <input type="file" class="form-control form-control-sm" id="icon" name="icon" accept="image/png">
                         <div class="form-text text-muted">57x57 PNG for iPhone display (max 1MB)</div>
@@ -55,12 +59,29 @@
                             {% if app.icon_url %}
                             <img src="{{ app.icon_url }}" alt="App Icon" class="me-3" style="width: 57px; height: 57px;">
                             {% endif %}
-                            <div>
+                            <div class="flex-grow-1">
                                 <h5 class="mb-1">{{ app.app_name }}</h5>
                                 <p class="mb-1">Bundle ID: {{ app.bundle_id }}</p>
                                 <small>Created: {{ app.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</small>
+                                <br>
+                                <small class="{% if app.expiration_date < now %}text-danger{% elif (app.expiration_date - now).days < 2 %}text-warning{% else %}text-muted{% endif %}">
+                                    Expires: {{ app.expiration_date.strftime('%Y-%m-%d %H:%M:%S') }}
+                                </small>
                                 <div class="mt-2">
                                     <a href="{{ app.installation_url }}" class="btn btn-sm btn-success">Install</a>
+                                    <form method="POST" action="{{ url_for('toggle_share', app_id=app.id) }}" class="d-inline">
+                                        <button type="submit" class="btn btn-sm {% if app.is_public %}btn-warning{% else %}btn-secondary{% endif %}">
+                                            {% if app.is_public %}Make Private{% else %}Share{% endif %}
+                                        </button>
+                                    </form>
+                                    {% if app.is_public %}
+                                    <button class="btn btn-sm btn-info" onclick="copyShareLink('{{ url_for('shared_app', token=app.share_token, _external=True) }}')">
+                                        Copy Link
+                                    </button>
+                                    {% endif %}
+                                    <form method="POST" action="{{ url_for('extend_expiration', app_id=app.id) }}" class="d-inline">
+                                        <button type="submit" class="btn btn-sm btn-outline-primary">+7 Days</button>
+                                    </form>
                                 </div>
                             </div>
                         </div>
@@ -74,4 +95,14 @@
         </div>
     </div>
 </div>
+
+<script>
+function copyShareLink(link) {
+    navigator.clipboard.writeText(link).then(() => {
+        alert('Share link copied to clipboard!');
+    }).catch(err => {
+        console.error('Failed to copy link:', err);
+    });
+}
+</script>
 {% endblock %}

@@ -1,11 +1,12 @@
 import os
-from flask import render_template, request, redirect, url_for, flash, send_file
+from flask import render_template, request, redirect, url_for, flash, send_file, abort, current_app
 from flask_login import login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from app import app, db
 from models import User, SignedApp
 from signing import IPASigner
+from datetime import datetime, timedelta
 
 @app.route('/')
 def index():
@@ -42,7 +43,18 @@ def register():
 @login_required
 def dashboard():
     apps = SignedApp.query.filter_by(user_id=current_user.id).all()
-    return render_template('dashboard.html', apps=apps)
+    # Delete expired files
+    now = datetime.utcnow()
+    for app in apps:
+        if app.expiration_date < now:
+            try:
+                if os.path.exists(app.ipa_path):
+                    os.remove(app.ipa_path)
+                if os.path.exists(app.plist_path):
+                    os.remove(app.plist_path)
+            except Exception as e:
+                print(f"Error deleting expired files: {e}")
+    return render_template('dashboard.html', apps=apps, now=datetime.utcnow())
 
 def validate_icon(icon_file, max_size, expected_size):
     """Validate icon file size and dimensions"""
@@ -68,7 +80,7 @@ def validate_icon(icon_file, max_size, expected_size):
         icon_file.seek(0)
         return True, None
     except Exception as e:
-        return False, str(e)  # Convert exception message to string
+        return False, str(e)
 
 def save_icon(icon_file, upload_dir):
     """Save icon file and return URL"""
@@ -91,6 +103,12 @@ def sign_app():
     p12_file = request.files['p12']
     provision_file = request.files['provision']
     p12_password = request.form['p12_password']
+    expiration_days = int(request.form.get('expiration_days', 7))
+
+    # Validate expiration days
+    if not 1 <= expiration_days <= 30:
+        flash('Invalid expiration period. Must be between 1 and 30 days.')
+        return redirect(url_for('dashboard'))
 
     # Validate required files
     if not ipa_file.filename or not p12_file.filename or not provision_file.filename:
@@ -98,7 +116,7 @@ def sign_app():
         return redirect(url_for('dashboard'))
 
     # Create upload directory
-    upload_dir = os.path.join(app.root_path, app.config['UPLOAD_FOLDER'])
+    upload_dir = os.path.join(current_app.root_path, current_app.config['UPLOAD_FOLDER'])
     os.makedirs(upload_dir, exist_ok=True)
 
     # Save required files
@@ -119,19 +137,19 @@ def sign_app():
     
     if icon:
         valid, error = validate_icon(icon, 1024*1024, 57)  # 1MB max, 57x57 pixels
-        if not valid and error:  # Check if error is not None
-            flash(str(error))  # Convert to string explicitly
+        if not valid and error:
+            flash(str(error))
             return redirect(url_for('dashboard'))
         icon_url = save_icon(icon, upload_dir)
         
     if full_size_icon:
         valid, error = validate_icon(full_size_icon, 2*1024*1024, 512)  # 2MB max, 512x512 pixels
-        if not valid and error:  # Check if error is not None
-            flash(str(error))  # Convert to string explicitly
+        if not valid and error:
+            flash(str(error))
             return redirect(url_for('dashboard'))
         full_size_icon_url = save_icon(full_size_icon, upload_dir)
 
-    # Sign IPA with improved error handling
+    # Sign IPA
     try:
         signer = IPASigner(ipa_path, p12_path, provision_path, p12_password)
         success, result = signer.sign_ipa()
@@ -161,16 +179,17 @@ def sign_app():
             signed_app.installation_url = f"itms-services://?action=download-manifest&url={request.host_url}manifest/{os.path.basename(manifest_path)}"
             signed_app.icon_url = icon_url
             signed_app.full_size_icon_url = full_size_icon_url
+            signed_app.expiration_date = datetime.utcnow() + timedelta(days=expiration_days)
             
             db.session.add(signed_app)
             db.session.commit()
             
             flash('App signed successfully')
         else:
-            flash(f'Error signing app: {str(result)}')  # Convert to string explicitly
+            flash(f'Error signing app: {str(result)}')
 
     except Exception as e:
-        flash(f'Signing process failed: {str(e)}')  # Convert to string explicitly
+        flash(f'Signing process failed: {str(e)}')
 
     return redirect(url_for('dashboard'))
 
@@ -182,13 +201,50 @@ def logout():
 
 @app.route('/manifest/<filename>')
 def serve_manifest(filename):
-    return send_file(
-        os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], filename),
-        mimetype='application/xml'
-    )
+    app = None
+    upload_path = os.path.join(current_app.root_path, current_app.config['UPLOAD_FOLDER'], filename)
+    
+    if current_user.is_authenticated:
+        app = SignedApp.query.filter_by(
+            user_id=current_user.id,
+            plist_path=upload_path
+        ).first()
+    else:
+        app = SignedApp.query.filter(
+            SignedApp.is_public == True,
+            SignedApp.plist_path.contains(filename),
+            SignedApp.expiration_date > datetime.utcnow()
+        ).first()
+        
+    if not app:
+        abort(404)
+        
+    return send_file(upload_path, mimetype='application/xml')
 
 @app.route('/download/<filename>')
 def download_file(filename):
+    # Find the associated app
+    upload_path = os.path.join(current_app.root_path, current_app.config['UPLOAD_FOLDER'], filename)
+    
+    if current_user.is_authenticated:
+        app = SignedApp.query.filter(
+            SignedApp.user_id == current_user.id,
+            (SignedApp.ipa_path == upload_path) | 
+            (SignedApp.icon_url.contains(filename)) | 
+            (SignedApp.full_size_icon_url.contains(filename))
+        ).first()
+    else:
+        app = SignedApp.query.filter(
+            SignedApp.is_public == True,
+            SignedApp.expiration_date > datetime.utcnow(),
+            (SignedApp.ipa_path == upload_path) | 
+            (SignedApp.icon_url.contains(filename)) | 
+            (SignedApp.full_size_icon_url.contains(filename))
+        ).first()
+    
+    if not app:
+        abort(404)
+    
     mime_type = 'application/octet-stream'
     if filename.endswith('.png'):
         mime_type = 'image/png'
@@ -200,7 +256,37 @@ def download_file(filename):
         mime_type = 'application/octet-stream'
     
     return send_file(
-        os.path.join(app.root_path, app.config['UPLOAD_FOLDER'], filename),
+        upload_path,
         mimetype=mime_type,
         as_attachment=True if mime_type == 'application/octet-stream' else False
     )
+
+@app.route('/toggle-share/<int:app_id>', methods=['POST'])
+@login_required
+def toggle_share(app_id):
+    app = SignedApp.query.filter_by(id=app_id, user_id=current_user.id).first_or_404()
+    app.is_public = not app.is_public
+    db.session.commit()
+    flash('Sharing settings updated successfully')
+    return redirect(url_for('dashboard'))
+
+@app.route('/extend-expiration/<int:app_id>', methods=['POST'])
+@login_required
+def extend_expiration(app_id):
+    app = SignedApp.query.filter_by(id=app_id, user_id=current_user.id).first_or_404()
+    app.expiration_date = app.expiration_date + timedelta(days=7)
+    db.session.commit()
+    flash('Expiration date extended by 7 days')
+    return redirect(url_for('dashboard'))
+
+@app.route('/shared/<token>')
+def shared_app(token):
+    app = SignedApp.query.filter_by(
+        share_token=token,
+        is_public=True
+    ).first_or_404()
+    
+    if app.expiration_date < datetime.utcnow():
+        abort(410)  # Gone - resource no longer available
+        
+    return render_template('shared_app.html', app=app, now=datetime.utcnow())

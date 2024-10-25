@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header d-flex align-items-center">
+                    {% if app.icon_url %}
+                    <img src="{{ app.icon_url }}" alt="App Icon" class="me-3" style="width: 57px; height: 57px;">
+                    {% endif %}
+                    <h4 class="mb-0">{{ app.app_name }}</h4>
+                </div>
+                <div class="card-body">
+                    <p class="mb-2">Bundle ID: {{ app.bundle_id }}</p>
+                    <p class="mb-3">
+                        <small class="{% if app.expiration_date < now %}text-danger{% elif (app.expiration_date - now).days < 2 %}text-warning{% else %}text-muted{% endif %}">
+                            Available until: {{ app.expiration_date.strftime('%Y-%m-%d %H:%M:%S') }}
+                        </small>
+                    </p>
+                    <a href="{{ app.installation_url }}" class="btn btn-success">
+                        Install on Device
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
