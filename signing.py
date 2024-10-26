@@ -55,43 +55,84 @@ class IPASigner:
             
             # Extract IPA contents
             with zipfile.ZipFile(self.ipa_path, 'r') as zip_ref:
+                # List all files in the IPA for debugging
+                print("Files in IPA:")
+                for file in zip_ref.namelist():
+                    print(f"  {file}")
                 zip_ref.extractall(extract_dir)
             print("IPA extracted successfully")
 
             # Find Payload directory
             payload_dir = os.path.join(extract_dir, "Payload")
             if not os.path.exists(payload_dir):
-                raise ValueError("Invalid IPA structure: Payload directory not found")
+                # Try to find Payload directory case-insensitive
+                for item in os.listdir(extract_dir):
+                    if item.lower() == "payload":
+                        payload_dir = os.path.join(extract_dir, item)
+                        break
+                if not os.path.exists(payload_dir):
+                    raise ValueError("Invalid IPA structure: Payload directory not found")
 
-            # Find .app directory with better error handling
-            app_dirs = [f for f in os.listdir(payload_dir) if f.endswith('.app')]
+            # Find .app directory
+            app_dirs = []
+            for item in os.listdir(payload_dir):
+                if item.endswith('.app'):
+                    app_dirs.append(item)
+                print(f"Found directory: {item}")
+            
             if not app_dirs:
                 raise ValueError("No .app directory found in Payload")
-            self.app_path = os.path.join(payload_dir, app_dirs[0])
             
-            # Verify app directory exists
-            if not os.path.exists(self.app_path):
-                raise ValueError(f"App directory not found: {self.app_path}")
-                
-            # Find and verify Info.plist
-            info_plist_path = os.path.join(self.app_path, 'Info.plist')
-            if not os.path.exists(info_plist_path):
-                # Try alternate locations
-                alt_paths = [
-                    os.path.join(self.app_path, '_CodeSignature', 'Info.plist'),
-                    os.path.join(extract_dir, 'Info.plist')
-                ]
-                for alt_path in alt_paths:
-                    if os.path.exists(alt_path):
-                        # Copy to correct location
-                        os.makedirs(os.path.dirname(info_plist_path), exist_ok=True)
-                        shutil.copy2(alt_path, info_plist_path)
+            self.app_path = os.path.join(payload_dir, app_dirs[0])
+            print(f"Using app directory: {self.app_path}")
+            
+            # Look for Info.plist in multiple locations
+            possible_plist_locations = [
+                os.path.join(self.app_path, 'Info.plist'),
+                os.path.join(self.app_path, 'Contents', 'Info.plist'),
+                os.path.join(self.app_path, '_CodeSignature', 'Info.plist'),
+                os.path.join(extract_dir, 'Info.plist'),
+                os.path.join(payload_dir, 'Info.plist')
+            ]
+            
+            info_plist_path = None
+            print("Searching for Info.plist in:")
+            for location in possible_plist_locations:
+                print(f"  Checking {location}")
+                if os.path.exists(location):
+                    info_plist_path = location
+                    print(f"  Found Info.plist at: {location}")
+                    break
+            
+            if not info_plist_path:
+                # If not found, try to search recursively
+                print("Searching recursively for Info.plist...")
+                for root, dirs, files in os.walk(self.app_path):
+                    if 'Info.plist' in files:
+                        info_plist_path = os.path.join(root, 'Info.plist')
+                        print(f"Found Info.plist at: {info_plist_path}")
                         break
+            
+            if not info_plist_path:
+                raise ValueError("Info.plist not found in app bundle")
                 
-                if not os.path.exists(info_plist_path):
-                    raise ValueError(f"Info.plist not found in app bundle: {info_plist_path}")
-                    
-            print(f"Found app bundle: {self.app_path}")
+            # Copy Info.plist to standard location if it's not there
+            standard_location = os.path.join(self.app_path, 'Info.plist')
+            if info_plist_path != standard_location:
+                print(f"Copying Info.plist to standard location: {standard_location}")
+                os.makedirs(os.path.dirname(standard_location), exist_ok=True)
+                shutil.copy2(info_plist_path, standard_location)
+            
+            # Verify Info.plist is valid
+            try:
+                with open(standard_location, 'rb') as f:
+                    plist_content = plistlib.load(f)
+                    if 'CFBundleIdentifier' not in plist_content:
+                        raise ValueError("Info.plist is missing CFBundleIdentifier")
+                    print(f"Valid Info.plist found with bundle ID: {plist_content['CFBundleIdentifier']}")
+            except Exception as e:
+                raise ValueError(f"Invalid Info.plist: {str(e)}")
+                
             return True
         except Exception as e:
             raise ValueError(f"Failed to extract IPA: {str(e)}")
@@ -237,15 +278,18 @@ activate = 1
             
             print("Signing application files...")
             # Sign all required files
+            signed_count = 0
             for root, dirs, files in os.walk(self.app_path):
                 for file in files:
-                    if file.endswith(('.dylib', '')):
+                    if file.endswith(('.dylib', '')):  # Empty string matches files without extension
                         file_path = os.path.join(root, file)
-                        if os.path.isfile(file_path):
-                            print(f"Signing {file}")
+                        if os.path.isfile(file_path) and not file.startswith('.'):
+                            print(f"Signing: {file}")
                             if not self.sign_file(file_path):
                                 raise ValueError(f"Failed to sign {file}")
+                            signed_count += 1
             
+            print(f"Successfully signed {signed_count} files")
             print("Packaging signed IPA...")
             signed_path = self.package_ipa()
             print("Signing completed successfully")
@@ -260,22 +304,62 @@ activate = 1
             self.cleanup()
 
     def package_ipa(self):
-        """Create signed IPA file"""
         try:
             if not self.app_path:
                 raise ValueError("App path not set")
+                
+            # Get the root of extracted contents
+            extract_dir = os.path.dirname(os.path.dirname(self.app_path))
+            
+            # Create signed IPA filename
             ipa_name = os.path.splitext(os.path.basename(self.ipa_path))[0]
             signed_name = f"{ipa_name}_signed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipa"
             self.signed_ipa_path = os.path.join(os.path.dirname(self.ipa_path), signed_name)
             
-            with zipfile.ZipFile(self.signed_ipa_path, 'w', zipfile.ZIP_STORED) as zf:
-                for root, dirs, files in os.walk(os.path.dirname(self.app_path)):
+            print(f"Creating signed IPA at: {self.signed_ipa_path}")
+            print(f"Using source directory: {extract_dir}")
+            
+            # Create signed IPA with all original contents
+            with zipfile.ZipFile(self.signed_ipa_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                # First, let's verify what files we have
+                print("Files to be packaged:")
+                for root, dirs, files in os.walk(extract_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        arc_path = os.path.relpath(file_path, os.path.dirname(self.app_path))
-                        zf.write(file_path, arc_path)
+                        arc_path = os.path.relpath(file_path, extract_dir)
+                        print(f"  {arc_path}")
+                        try:
+                            zf.write(file_path, arc_path)
+                            print(f"  ✓ Added: {arc_path}")
+                        except Exception as e:
+                            print(f"  ✗ Failed to add {arc_path}: {str(e)}")
             
+            # Verify the signed IPA
+            if not os.path.exists(self.signed_ipa_path):
+                raise ValueError("Failed to create signed IPA file")
+                
+            original_size = os.path.getsize(self.ipa_path)
+            signed_size = os.path.getsize(self.signed_ipa_path)
+            print(f"Original IPA size: {original_size:,} bytes")
+            print(f"Signed IPA size: {signed_size:,} bytes")
+            
+            if signed_size < original_size * 0.5:
+                raise ValueError(f"Signed IPA is too small: {signed_size:,} bytes vs original {original_size:,} bytes")
+                
+            # Verify the contents of the signed IPA
+            print("Verifying signed IPA contents:")
+            with zipfile.ZipFile(self.signed_ipa_path, 'r') as zf:
+                for info in zf.filelist:
+                    print(f"  {info.filename} - {info.file_size:,} bytes")
+                
+                # Verify Payload and Info.plist exist
+                if not any(name.startswith('Payload/') for name in zf.namelist()):
+                    raise ValueError("Missing Payload directory in signed IPA")
+                if not any('Info.plist' in name for name in zf.namelist()):
+                    raise ValueError("Missing Info.plist in signed IPA")
+                    
             return self.signed_ipa_path
+            
         except Exception as e:
             raise ValueError(f"Failed to package IPA: {str(e)}")
 
