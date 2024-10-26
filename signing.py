@@ -46,7 +46,6 @@ class IPASigner:
             raise ValueError(f"Failed to create temp directory: {str(e)}")
 
     def extract_ipa(self):
-        """Extract IPA contents"""
         try:
             print("Extracting IPA...")
             if not self.temp_dir:
@@ -60,6 +59,12 @@ class IPASigner:
             payload_dir = os.path.join(extract_dir, "Payload")
             app_name = next(f for f in os.listdir(payload_dir) if f.endswith('.app'))
             self.app_path = os.path.join(payload_dir, app_name)
+            
+            # Verify Info.plist exists
+            info_plist_path = os.path.join(self.app_path, 'Info.plist')
+            if not os.path.exists(info_plist_path):
+                raise ValueError(f"Info.plist not found in app bundle: {info_plist_path}")
+                
             print(f"Found app bundle: {self.app_path}")
             return True
         except Exception as e:
@@ -148,7 +153,6 @@ activate = 1
             raise ValueError(f"Failed to extract certificates: {str(e)}")
 
     def sign_file(self, file_path):
-        """Sign a file using OpenSSL CMS"""
         try:
             if not self.temp_dir or not self.cert_path or not self.key_path:
                 raise ValueError("Certificate paths not set")
@@ -249,14 +253,25 @@ activate = 1
             raise ValueError(f"Failed to package IPA: {str(e)}")
 
     def extract_bundle_id(self):
-        """Extract bundle ID from Info.plist"""
         try:
             if not self.app_path:
                 raise ValueError("App path not set")
+                
             info_plist = os.path.join(self.app_path, 'Info.plist')
-            with open(info_plist, 'rb') as f:
-                plist = plistlib.load(f)
-            return plist.get('CFBundleIdentifier')
+            if not os.path.exists(info_plist):
+                raise ValueError(f"Info.plist not found at: {info_plist}")
+                
+            try:
+                with open(info_plist, 'rb') as f:
+                    plist = plistlib.load(f)
+            except Exception as e:
+                raise ValueError(f"Failed to parse Info.plist: {str(e)}")
+                
+            bundle_id = plist.get('CFBundleIdentifier')
+            if not bundle_id:
+                raise ValueError("Bundle identifier not found in Info.plist")
+                
+            return bundle_id
         except Exception as e:
             raise ValueError(f"Failed to extract bundle ID: {str(e)}")
 
