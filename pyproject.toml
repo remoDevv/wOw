@@ -10,4 +10,5 @@ dependencies = [
     "psycopg2-binary>=2.9.10",
     "flask-login>=0.6.3",
     "pillow>=11.0.0",
+    "pyopenssl>=24.2.1",
 ]

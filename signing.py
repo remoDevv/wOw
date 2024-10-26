@@ -6,6 +6,7 @@ import plistlib
 import zipfile
 from datetime import datetime
 from werkzeug.utils import secure_filename
+from OpenSSL import crypto
 
 class IPASigner:
     def __init__(self, ipa_path, p12_path, provision_path, p12_password):
@@ -70,144 +71,73 @@ class IPASigner:
         except Exception as e:
             raise ValueError(f"Failed to copy provision: {str(e)}")
 
-    def extract_certificate(self):
-        """Extract certificate from P12"""
+    def extract_from_p12(self):
+        """Extract certificate and private key from P12 using OpenSSL"""
         try:
-            if not self.temp_dir:
-                self.temp_dir = tempfile.mkdtemp()
+            # Read P12 file
+            with open(self.p12_path, 'rb') as f:
+                p12 = crypto.load_pkcs12(f.read(), self.p12_password)
+            
+            # Extract certificate
+            cert = p12.get_certificate()
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
+            with open(self.cert_path, 'wb') as f:
+                f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
             
-            # Write password to temp file
-            pwd_path = os.path.join(self.temp_dir, 'pwd.txt')
-            with open(pwd_path, 'w') as f:
-                f.write(self.p12_password)
-            
-            try:
-                # Try multiple OpenSSL configurations
-                commands = [
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                     '-out', self.cert_path, '-passin', f'file:{pwd_path}',
-                     '-legacy'],
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                     '-out', self.cert_path, '-passin', f'file:{pwd_path}',
-                     '-provider', 'legacy', '-provider', 'default'],
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                     '-out', self.cert_path, '-passin', f'file:{pwd_path}']
-                ]
-                
-                success = False
-                last_error = None
-                
-                for cmd in commands:
-                    try:
-                        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                        success = True
-                        break
-                    except subprocess.CalledProcessError as e:
-                        last_error = e
-                        continue
-                
-                if not success and last_error:
-                    raise last_error
-                    
-                return True
-                
-            finally:
-                if os.path.exists(pwd_path):
-                    os.remove(pwd_path)
-                    
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f"Failed to extract certificate: {e.stderr}")
-        except Exception as e:
-            raise ValueError(f"Certificate extraction error: {str(e)}")
-
-    def extract_private_key(self):
-        """Extract private key from P12"""
-        try:
-            if not self.temp_dir:
-                self.temp_dir = tempfile.mkdtemp()
+            # Extract private key
+            pkey = p12.get_privatekey()
             self.key_path = os.path.join(self.temp_dir, 'private.key')
-            
-            pwd_path = os.path.join(self.temp_dir, 'pwd.txt')
-            with open(pwd_path, 'w') as f:
-                f.write(self.p12_password)
-            
-            try:
-                commands = [
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
-                     '-out', self.key_path, '-passin', f'file:{pwd_path}',
-                     '-legacy'],
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
-                     '-out', self.key_path, '-passin', f'file:{pwd_path}',
-                     '-provider', 'legacy', '-provider', 'default'],
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
-                     '-out', self.key_path, '-passin', f'file:{pwd_path}']
-                ]
+            with open(self.key_path, 'wb') as f:
+                f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, pkey))
                 
-                success = False
-                last_error = None
-                
-                for cmd in commands:
-                    try:
-                        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                        success = True
-                        break
-                    except subprocess.CalledProcessError as e:
-                        last_error = e
-                        continue
-                
-                if not success and last_error:
-                    raise last_error
-                    
-                return True
-                
-            finally:
-                if os.path.exists(pwd_path):
-                    os.remove(pwd_path)
-                    
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f"Failed to extract private key: {e.stderr}")
+            return True
         except Exception as e:
-            raise ValueError(f"Private key extraction error: {str(e)}")
+            raise ValueError(f"Failed to extract certificate and key: {str(e)}")
 
     def sign_application(self):
         """Sign the application using extracted certificate and key"""
         try:
+            # Extract entitlements
             entitlements_path = os.path.join(self.temp_dir, 'entitlements.plist')
-            
-            # Extract entitlements from provisioning profile
             subprocess.run([
                 'security', 'cms', '-D', '-i', self.provision_path,
                 '-o', entitlements_path
             ], check=True)
 
-            # Sign all dylib files first
+            # Generate code directory hash
+            codesign_alloc = subprocess.run([
+                'codesign_allocate', '-i', os.path.join(self.app_path, '_CodeSignature/CodeResources'),
+                '-a', 'arm64'
+            ], capture_output=True, check=True)
+
+            # Sign all components
             for root, dirs, files in os.walk(self.app_path):
                 for file in files:
-                    if file.endswith('.dylib'):
-                        dylib_path = os.path.join(root, file)
+                    if file.endswith(('.dylib', '.framework/Versions/A', '')):
+                        filepath = os.path.join(root, file)
+                        
+                        # Generate CMS signature
+                        cms = crypto.CMS()
+                        with open(self.key_path, 'rb') as f:
+                            key = crypto.load_privatekey(crypto.FILETYPE_PEM, f.read())
+                        with open(self.cert_path, 'rb') as f:
+                            cert = crypto.load_certificate(crypto.FILETYPE_PEM, f.read())
+                        
+                        # Sign with CMS
+                        cms.sign(cert, key, [cert], flags=crypto.CMS_BINARY)
+                        
+                        # Apply signature
                         subprocess.run([
-                            'codesign', '-f', '-s', self.cert_path,
-                            '--preserve-metadata=identifier,entitlements,requirements',
+                            'codesign', '-f', '-s', '-',
                             '--generate-entitlement-der',
+                            '--preserve-metadata=identifier,entitlements,requirements',
                             '--timestamp=none',
-                            dylib_path
-                        ], check=True)
-
-            # Sign the main application
-            subprocess.run([
-                'codesign', '-f', '-s', self.cert_path,
-                '--entitlements', entitlements_path,
-                '--generate-entitlement-der',
-                '--timestamp=none',
-                self.app_path
-            ], check=True)
+                            filepath
+                        ], input=cms.to_der(), check=True)
 
             return True
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f"Failed to sign application: {e.stderr}")
         except Exception as e:
-            raise ValueError(f"Application signing error: {str(e)}")
+            raise ValueError(f"Failed to sign application: {str(e)}")
 
     def package_ipa(self):
         """Create signed IPA file"""
@@ -216,10 +146,13 @@ class IPASigner:
             signed_name = f"{ipa_name}_signed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipa"
             self.signed_ipa_path = os.path.join(os.path.dirname(self.ipa_path), signed_name)
             
-            # Create IPA from Payload directory
-            payload_dir = os.path.dirname(os.path.dirname(self.app_path))
-            shutil.make_archive(self.signed_ipa_path, 'zip', payload_dir)
-            os.rename(f"{self.signed_ipa_path}.zip", self.signed_ipa_path)
+            # Create IPA maintaining signatures
+            with zipfile.ZipFile(self.signed_ipa_path, 'w', zipfile.ZIP_STORED) as zf:
+                for root, dirs, files in os.walk(os.path.dirname(self.app_path)):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arc_path = os.path.relpath(file_path, os.path.dirname(self.app_path))
+                        zf.write(file_path, arc_path)
             
             return self.signed_ipa_path
         except Exception as e:
@@ -241,8 +174,7 @@ class IPASigner:
             self.create_temp_dir()
             self.extract_ipa()
             self.copy_provision()
-            self.extract_certificate()
-            self.extract_private_key()
+            self.extract_from_p12()  # Updated to use new OpenSSL method
             self.sign_application()
             signed_path = self.package_ipa()
             return True, signed_path
