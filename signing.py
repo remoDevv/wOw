@@ -75,7 +75,7 @@ class IPASigner:
             raise ValueError(f"Failed to copy provision: {str(e)}")
 
     def extract_certificates(self):
-        """Extract certificates with secure password handling"""
+        """Extract certificates with secure password handling and OpenSSL compatibility"""
         try:
             # Create secure temp files
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
@@ -87,19 +87,51 @@ class IPASigner:
                 f.write(self.p12_password.decode())
                 
             try:
-                # Extract certificate and private key with multiple fallbacks
+                # Multiple OpenSSL command variations for better compatibility
                 commands = [
+                    # Try modern OpenSSL with legacy provider
+                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
+                     '-out', self.cert_path, '-passin', f'file:{pwd_path}',
+                     '-legacy'],
+                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
+                     '-out', self.key_path, '-passin', f'file:{pwd_path}',
+                     '-legacy'],
+                     
+                    # Try with provider option
+                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
+                     '-out', self.cert_path, '-passin', f'file:{pwd_path}',
+                     '-provider', 'legacy', '-provider', 'default'],
+                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
+                     '-out', self.key_path, '-passin', f'file:{pwd_path}',
+                     '-provider', 'legacy', '-provider', 'default'],
+                     
+                    # Try without any special options (fallback)
                     ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
                      '-out', self.cert_path, '-passin', f'file:{pwd_path}'],
                     ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
                      '-out', self.key_path, '-passin', f'file:{pwd_path}']
                 ]
                 
+                success = False
+                last_error = None
+                
+                # Try each command variation until one succeeds
                 for cmd in commands:
-                    result = subprocess.run(cmd, capture_output=True, text=True)
-                    if result.returncode != 0:
-                        raise ValueError(f"Certificate extraction failed: {result.stderr}")
-                        
+                    try:
+                        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                        success = True
+                        break
+                    except subprocess.CalledProcessError as e:
+                        last_error = e
+                        continue
+                
+                if not success:
+                    raise ValueError(f"Certificate extraction failed: {last_error.stderr if last_error else 'Unknown error'}")
+                
+                # Verify extracted files
+                if not (os.path.exists(self.cert_path) and os.path.exists(self.key_path)):
+                    raise ValueError("Failed to extract certificate or private key")
+                    
                 return True
                 
             finally:
