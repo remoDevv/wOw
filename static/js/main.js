@@ -1,4 +1,19 @@
 document.addEventListener('DOMContentLoaded', function() {
+    // Password toggle functionality
+    const togglePassword = document.querySelector('#togglePassword');
+    const password = document.querySelector('#p12_password');
+    
+    if (togglePassword && password) {
+        togglePassword.addEventListener('click', function(e) {
+            e.preventDefault();
+            const type = password.getAttribute('type') === 'password' ? 'text' : 'password';
+            password.setAttribute('type', type);
+            const icon = this.querySelector('i');
+            icon.classList.toggle('bi-eye');
+            icon.classList.toggle('bi-eye-slash');
+        });
+    }
+
     // File size validation
     const fileInputs = document.querySelectorAll('input[type="file"]');
     fileInputs.forEach(input => {
@@ -9,18 +24,4 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     });
-
-    // Password toggle functionality
-    const togglePassword = document.querySelector('#togglePassword');
-    const password = document.querySelector('#p12_password');
-    
-    if (togglePassword && password) {
-        togglePassword.addEventListener('click', function(e) {
-            e.preventDefault();
-            const type = password.getAttribute('type') === 'password' ? 'text' : 'password';
-            password.setAttribute('type', type);
-            this.querySelector('i').classList.toggle('bi-eye');
-            this.querySelector('i').classList.toggle('bi-eye-slash');
-        });
-    }
 });
