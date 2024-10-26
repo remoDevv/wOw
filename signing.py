@@ -49,6 +49,8 @@ class IPASigner:
         """Extract IPA contents"""
         try:
             print("Extracting IPA...")
+            if not self.temp_dir:
+                self.create_temp_dir()
             extract_dir = os.path.join(self.temp_dir, "ipa_contents")
             with zipfile.ZipFile(self.ipa_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
@@ -66,6 +68,8 @@ class IPASigner:
     def copy_provision(self):
         """Copy provisioning profile to app bundle"""
         try:
+            if not self.app_path:
+                raise ValueError("App path not set")
             embedded_path = os.path.join(self.app_path, "embedded.mobileprovision")
             shutil.copy2(self.provision_path, embedded_path)
             print("Copied provisioning profile")
@@ -76,121 +80,118 @@ class IPASigner:
     def extract_certificates(self):
         """Extract certificates with improved Linux compatibility"""
         try:
+            if not self.temp_dir:
+                self.create_temp_dir()
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
             self.key_path = os.path.join(self.temp_dir, 'key.pem')
             
-            # First attempt: Extract everything to a single file
-            combined_path = os.path.join(self.temp_dir, 'combined.pem')
+            # Create OpenSSL config file to force legacy provider
+            ssl_config = os.path.join(self.temp_dir, 'openssl.cnf')
+            with open(ssl_config, 'w') as f:
+                f.write('''
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+[provider_sect]
+default = default_sect
+legacy = legacy_sect
+
+[default_sect]
+activate = 1
+
+[legacy_sect]
+activate = 1
+''')
             
-            # Basic command without any special providers
-            basic_cmd = [
+            # Set OpenSSL config environment
+            env = os.environ.copy()
+            env['OPENSSL_CONF'] = ssl_config
+            
+            # Extract certificate
+            cert_cmd = [
                 'openssl', 'pkcs12', '-in', self.p12_path,
-                '-nodes', '-out', combined_path,
+                '-clcerts', '-nokeys', '-out', self.cert_path,
                 '-passin', f'pass:{self.p12_password.decode()}'
             ]
             
-            result = subprocess.run(basic_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"Basic extraction failed: {result.stderr}")
-                # Fallback: try with -legacy flag
-                legacy_cmd = basic_cmd + ['-legacy']
-                result = subprocess.run(legacy_cmd, capture_output=True, text=True)
+            # Extract private key
+            key_cmd = [
+                'openssl', 'pkcs12', '-in', self.p12_path,
+                '-nocerts', '-nodes', '-out', self.key_path,
+                '-passin', f'pass:{self.p12_password.decode()}'
+            ]
+            
+            for cmd in [cert_cmd, key_cmd]:
+                result = subprocess.run(cmd, capture_output=True, text=True, env=env)
                 if result.returncode != 0:
                     raise ValueError(f"Certificate extraction failed: {result.stderr}")
             
-            # Read the combined file
-            with open(combined_path, 'r') as f:
-                content = f.read()
+            # Verify certificate and key
+            cert_verify = subprocess.run(
+                ['openssl', 'x509', '-in', self.cert_path, '-noout'],
+                capture_output=True, text=True, env=env
+            )
             
-            # Split the content into certificate and private key
-            cert_content = ""
-            key_content = ""
-            current_section = None
+            key_verify = subprocess.run(
+                ['openssl', 'rsa', '-in', self.key_path, '-check', '-noout'],
+                capture_output=True, text=True, env=env
+            )
             
-            for line in content.split('\n'):
-                if '-----BEGIN CERTIFICATE-----' in line:
-                    current_section = 'cert'
-                    cert_content = line + '\n'
-                elif '-----BEGIN PRIVATE KEY-----' in line:
-                    current_section = 'key'
-                    key_content = line + '\n'
-                elif '-----END CERTIFICATE-----' in line:
-                    cert_content += line + '\n'
-                    current_section = None
-                elif '-----END PRIVATE KEY-----' in line:
-                    key_content += line + '\n'
-                    current_section = None
-                elif current_section == 'cert':
-                    cert_content += line + '\n'
-                elif current_section == 'key':
-                    key_content += line + '\n'
-            
-            # Write separated files
-            if cert_content and key_content:
-                with open(self.cert_path, 'w') as f:
-                    f.write(cert_content.strip())
-                with open(self.key_path, 'w') as f:
-                    f.write(key_content.strip())
-            else:
-                raise ValueError("Failed to extract certificate or private key from combined file")
-            
-            # Verify the extracted files
-            verify_cert = subprocess.run(['openssl', 'x509', '-in', self.cert_path, '-noout'], 
-                                       capture_output=True, text=True)
-            verify_key = subprocess.run(['openssl', 'rsa', '-in', self.key_path, '-check', '-noout'],
-                                      capture_output=True, text=True)
-            
-            if verify_cert.returncode != 0 or verify_key.returncode != 0:
+            if cert_verify.returncode != 0 or key_verify.returncode != 0:
                 raise ValueError("Invalid certificate or private key")
-            
-            # Clean up combined file
-            os.remove(combined_path)
+                
             return True
             
         except Exception as e:
-            if 'combined_path' in locals() and os.path.exists(combined_path):
-                os.remove(combined_path)
             raise ValueError(f"Failed to extract certificates: {str(e)}")
 
     def sign_file(self, file_path):
         """Sign a file using OpenSSL CMS"""
         try:
-            # Generate temporary files
+            if not self.temp_dir or not self.cert_path or not self.key_path:
+                raise ValueError("Certificate paths not set")
+
+            # Create temporary files
             content_path = os.path.join(self.temp_dir, 'content.bin')
-            sig_path = os.path.join(self.temp_dir, 'signature.p7s')
+            sig_path = os.path.join(self.temp_dir, 'signature.sig')
             
             # Copy file to temp location
             shutil.copy2(file_path, content_path)
             
-            # Sign with CMS
+            # Create certificate chain file
+            chain_path = os.path.join(self.temp_dir, 'chain.pem')
+            with open(chain_path, 'w') as f:
+                with open(self.cert_path) as cert:
+                    f.write(cert.read())
+            
+            # Sign with CMS using proper flags
             sign_cmd = [
-                'openssl', 'cms', '-sign', '-binary',
+                'openssl', 'cms', '-sign',
                 '-signer', self.cert_path,
                 '-inkey', self.key_path,
+                '-binary', '-noattr',
+                '-certfile', chain_path,
+                '-outform', 'DER',
                 '-in', content_path,
-                '-out', sig_path,
-                '-outform', 'DER'
+                '-out', sig_path
             ]
             
-            result = subprocess.run(sign_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise ValueError(f"Signing failed: {result.stderr}")
-                
-            # Verify signature
-            verify_cmd = [
-                'openssl', 'cms', '-verify',
-                '-binary', '-inform', 'DER',
-                '-in', sig_path,
-                '-content', content_path,
-                '-certfile', self.cert_path
-            ]
+            env = os.environ.copy()
+            env['OPENSSL_CONF'] = os.path.join(self.temp_dir, 'openssl.cnf')
             
-            result = subprocess.run(verify_cmd, capture_output=True, text=True)
+            result = subprocess.run(sign_cmd, capture_output=True, text=True, env=env)
             if result.returncode != 0:
-                raise ValueError(f"Signature verification failed: {result.stderr}")
-                
-            # Replace original with signed version
-            shutil.move(sig_path, file_path + '.sig')
+                raise ValueError(f"Failed to sign file: {result.stderr}")
+            
+            # Move signature to final location
+            shutil.move(sig_path, file_path)
+            
+            # Clean up
+            os.remove(content_path)
+            os.remove(chain_path)
+            
             return True
             
         except Exception as e:
@@ -236,6 +237,8 @@ class IPASigner:
     def package_ipa(self):
         """Create signed IPA file"""
         try:
+            if not self.app_path:
+                raise ValueError("App path not set")
             ipa_name = os.path.splitext(os.path.basename(self.ipa_path))[0]
             signed_name = f"{ipa_name}_signed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipa"
             self.signed_ipa_path = os.path.join(os.path.dirname(self.ipa_path), signed_name)
@@ -254,6 +257,8 @@ class IPASigner:
     def extract_bundle_id(self):
         """Extract bundle ID from Info.plist"""
         try:
+            if not self.app_path:
+                raise ValueError("App path not set")
             info_plist = os.path.join(self.app_path, 'Info.plist')
             with open(info_plist, 'rb') as f:
                 plist = plistlib.load(f)
