@@ -9,6 +9,11 @@
                     <h4 class="mb-0">{{ app.app_name }}</h4>
                 </div>
                 <div class="card-body">
+                    <p class="text-muted mb-3">
+                        To install this app on your iOS device:
+                        1. Click the Install button below
+                        2. Accept the installation prompt on your device
+                    </p>
                     <p class="mb-2">Bundle ID: {{ app.bundle_id }}</p>
                     <p class="mb-3">
                         <small class="{% if app.expiration_date < now %}text-danger{% elif (app.expiration_date - now).days < 2 %}text-warning{% else %}text-muted{% endif %}">

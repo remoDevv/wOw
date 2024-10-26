@@ -8,6 +8,10 @@
                 <h4>Sign New IPA</h4>
             </div>
             <div class="card-body">
+                <p class="text-muted mb-3">
+                    Upload your IPA file along with signing credentials to create an installable iOS app.
+                    All apps expire automatically after 30 days.
+                </p>
                 <form method="POST" action="{{ url_for('sign_app') }}" enctype="multipart/form-data">
                     <div class="mb-3">
                         <label for="ipa" class="form-label">IPA File</label>
@@ -42,6 +46,10 @@
                 <h4>Signed Applications</h4>
             </div>
             <div class="card-body">
+                <p class="text-muted mb-3">
+                    Your signed applications are listed below. You can install them directly on your device
+                    or share them with others using public links.
+                </p>
                 {% if apps %}
                 <div class="list-group">
                     {% for app in apps %}
