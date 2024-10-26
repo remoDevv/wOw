@@ -74,110 +74,122 @@ class IPASigner:
         except Exception as e:
             raise ValueError(f"Failed to copy provision: {str(e)}")
 
-    def extract_from_p12(self):
+    def extract_certificates(self):
+        """Extract certificates with secure password handling"""
         try:
-            # Create OpenSSL command with legacy providers
-            env = os.environ.copy()
-            env['OPENSSL_CONF'] = ''  # Prevent loading system config
-            
-            commands = [
-                # Try with legacy provider
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-nodes',
-                 '-out', os.path.join(self.temp_dir, 'combined.pem'),
-                 '-passin', f'pass:{self.p12_password.decode()}',
-                 '-legacy'],
-                
-                # Try without legacy provider
-                ['openssl', 'pkcs12', '-in', self.p12_path, '-nodes',
-                 '-out', os.path.join(self.temp_dir, 'combined.pem'),
-                 '-passin', f'pass:{self.p12_password.decode()}']
-            ]
-            
-            success = False
-            last_error = None
-            
-            for cmd in commands:
-                try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
-                    success = True
-                    break
-                except subprocess.CalledProcessError as e:
-                    last_error = e
-                    continue
-            
-            if not success:
-                raise ValueError(f"Failed to extract certificate: {last_error.stderr if last_error else 'Unknown error'}")
-                
-            # Split combined PEM into certificate and key
-            combined_path = os.path.join(self.temp_dir, 'combined.pem')
+            # Create secure temp files
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
-            self.key_path = os.path.join(self.temp_dir, 'private.key')
+            self.key_path = os.path.join(self.temp_dir, 'key.pem')
             
-            with open(combined_path, 'r') as f:
-                combined = f.read()
+            # Write password to secure temp file
+            pwd_path = os.path.join(self.temp_dir, 'pwd.txt')
+            with open(pwd_path, 'w') as f:
+                f.write(self.p12_password.decode())
                 
-            # Extract certificate and key using string manipulation
-            cert_start = '-----BEGIN CERTIFICATE-----'
-            cert_end = '-----END CERTIFICATE-----'
-            key_start = '-----BEGIN PRIVATE KEY-----'
-            key_end = '-----END PRIVATE KEY-----'
-            
-            cert_idx = combined.find(cert_start)
-            key_idx = combined.find(key_start)
-            
-            if cert_idx >= 0 and key_idx >= 0:
-                cert = combined[cert_idx:combined.find(cert_end) + len(cert_end)]
-                key = combined[key_idx:combined.find(key_end) + len(key_end)]
+            try:
+                # Extract certificate and private key with multiple fallbacks
+                commands = [
+                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
+                     '-out', self.cert_path, '-passin', f'file:{pwd_path}'],
+                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
+                     '-out', self.key_path, '-passin', f'file:{pwd_path}']
+                ]
                 
-                with open(self.cert_path, 'w') as f:
-                    f.write(cert)
-                with open(self.key_path, 'w') as f:
-                    f.write(key)
-                    
-                # Clean up combined file
-                os.remove(combined_path)
+                for cmd in commands:
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        raise ValueError(f"Certificate extraction failed: {result.stderr}")
+                        
                 return True
-            else:
-                raise ValueError("Failed to extract certificate and key from combined PEM")
                 
+            finally:
+                # Secure cleanup
+                if os.path.exists(pwd_path):
+                    os.remove(pwd_path)
+                    
         except Exception as e:
-            raise ValueError(f"Failed to extract certificate and key: {str(e)}")
+            raise ValueError(f"Failed to extract certificates: {str(e)}")
 
-    def sign_file(self, filepath):
-        """Sign a single file with OpenSSL"""
+    def sign_file(self, file_path):
+        """Sign a file using OpenSSL CMS"""
         try:
-            # Use OpenSSL CMS for signing
-            env = os.environ.copy()
-            env['OPENSSL_CONF'] = ''  # Prevent loading system config
+            # Generate temporary files
+            content_path = os.path.join(self.temp_dir, 'content.bin')
+            sig_path = os.path.join(self.temp_dir, 'signature.p7s')
             
-            cmd = [
-                'openssl', 'cms', '-sign', '-binary', '-noattr',
+            # Copy file to temp location
+            shutil.copy2(file_path, content_path)
+            
+            # Sign with CMS
+            sign_cmd = [
+                'openssl', 'cms', '-sign', '-binary',
                 '-signer', self.cert_path,
                 '-inkey', self.key_path,
-                '-outform', 'DER',
-                '-in', filepath,
-                '-out', filepath + '.sig'
+                '-in', content_path,
+                '-out', sig_path,
+                '-outform', 'DER'
             ]
             
-            subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+            result = subprocess.run(sign_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise ValueError(f"Signing failed: {result.stderr}")
+                
+            # Verify signature
+            verify_cmd = [
+                'openssl', 'cms', '-verify',
+                '-binary', '-inform', 'DER',
+                '-in', sig_path,
+                '-content', content_path,
+                '-certfile', self.cert_path
+            ]
+            
+            result = subprocess.run(verify_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise ValueError(f"Signature verification failed: {result.stderr}")
+                
+            # Replace original with signed version
+            shutil.move(sig_path, file_path + '.sig')
             return True
+            
         except Exception as e:
-            print(f"Failed to sign file {filepath}: {str(e)}")
+            print(f"Failed to sign {file_path}: {str(e)}")
             return False
 
-    def sign_application(self):
-        """Sign the application using OpenSSL"""
+    def sign_ipa(self):
+        """Main signing process with improved error handling and logging"""
         try:
-            # Sign all executable files
+            print("Starting IPA signing process...")
+            self.create_temp_dir()
+            print("Extracting IPA contents...")
+            self.extract_ipa()
+            print("Copying provisioning profile...")
+            self.copy_provision()
+            print("Extracting certificates...")
+            self.extract_certificates()
+            
+            print("Signing application files...")
+            # Sign all required files
             for root, dirs, files in os.walk(self.app_path):
                 for file in files:
-                    if file.endswith(('.dylib', '') or 'Frameworks' in root):
-                        filepath = os.path.join(root, file)
-                        if os.path.isfile(filepath):
-                            self.sign_file(filepath)
-            return True
+                    if file.endswith(('.dylib', '')):
+                        file_path = os.path.join(root, file)
+                        if os.path.isfile(file_path):
+                            print(f"Signing {file}")
+                            if not self.sign_file(file_path):
+                                raise ValueError(f"Failed to sign {file}")
+            
+            print("Packaging signed IPA...")
+            signed_path = self.package_ipa()
+            print("Signing completed successfully")
+            return True, signed_path
+            
         except Exception as e:
-            raise ValueError(f"Failed to sign application: {str(e)}")
+            error_msg = f"Signing failed: {str(e)}"
+            print(error_msg)
+            return False, error_msg
+            
+        finally:
+            self.cleanup()
 
     def package_ipa(self):
         """Create signed IPA file"""
@@ -206,21 +218,6 @@ class IPASigner:
             return plist.get('CFBundleIdentifier')
         except Exception as e:
             raise ValueError(f"Failed to extract bundle ID: {str(e)}")
-
-    def sign_ipa(self):
-        """Main signing process"""
-        try:
-            self.create_temp_dir()
-            self.extract_ipa()
-            self.copy_provision()
-            self.extract_from_p12()
-            self.sign_application()
-            signed_path = self.package_ipa()
-            return True, signed_path
-        except Exception as e:
-            return False, str(e)
-        finally:
-            self.cleanup()
 
     @staticmethod
     def generate_manifest(bundle_id, app_url, title, version='1.0'):
