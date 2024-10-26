@@ -4,7 +4,6 @@ import tempfile
 import zipfile
 import plistlib
 from datetime import datetime
-from werkzeug.utils import secure_filename
 import subprocess
 
 class IPASigner:
@@ -75,71 +74,82 @@ class IPASigner:
             raise ValueError(f"Failed to copy provision: {str(e)}")
 
     def extract_certificates(self):
-        """Extract certificates with secure password handling and OpenSSL compatibility"""
+        """Extract certificates with improved Linux compatibility"""
         try:
-            # Create secure temp files
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
             self.key_path = os.path.join(self.temp_dir, 'key.pem')
             
-            # Write password to secure temp file
-            pwd_path = os.path.join(self.temp_dir, 'pwd.txt')
-            with open(pwd_path, 'w') as f:
-                f.write(self.p12_password.decode())
-                
-            try:
-                # Multiple OpenSSL command variations for better compatibility
-                commands = [
-                    # Try modern OpenSSL with legacy provider
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                     '-out', self.cert_path, '-passin', f'file:{pwd_path}',
-                     '-legacy'],
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
-                     '-out', self.key_path, '-passin', f'file:{pwd_path}',
-                     '-legacy'],
-                     
-                    # Try with provider option
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                     '-out', self.cert_path, '-passin', f'file:{pwd_path}',
-                     '-provider', 'legacy', '-provider', 'default'],
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
-                     '-out', self.key_path, '-passin', f'file:{pwd_path}',
-                     '-provider', 'legacy', '-provider', 'default'],
-                     
-                    # Try without any special options (fallback)
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-clcerts', '-nokeys',
-                     '-out', self.cert_path, '-passin', f'file:{pwd_path}'],
-                    ['openssl', 'pkcs12', '-in', self.p12_path, '-nocerts', '-nodes',
-                     '-out', self.key_path, '-passin', f'file:{pwd_path}']
-                ]
-                
-                success = False
-                last_error = None
-                
-                # Try each command variation until one succeeds
-                for cmd in commands:
-                    try:
-                        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                        success = True
-                        break
-                    except subprocess.CalledProcessError as e:
-                        last_error = e
-                        continue
-                
-                if not success:
-                    raise ValueError(f"Certificate extraction failed: {last_error.stderr if last_error else 'Unknown error'}")
-                
-                # Verify extracted files
-                if not (os.path.exists(self.cert_path) and os.path.exists(self.key_path)):
-                    raise ValueError("Failed to extract certificate or private key")
-                    
-                return True
-                
-            finally:
-                # Secure cleanup
-                if os.path.exists(pwd_path):
-                    os.remove(pwd_path)
-                    
+            # First attempt: Extract everything to a single file
+            combined_path = os.path.join(self.temp_dir, 'combined.pem')
+            
+            # Basic command without any special providers
+            basic_cmd = [
+                'openssl', 'pkcs12', '-in', self.p12_path,
+                '-nodes', '-out', combined_path,
+                '-passin', f'pass:{self.p12_password.decode()}'
+            ]
+            
+            result = subprocess.run(basic_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Basic extraction failed: {result.stderr}")
+                # Fallback: try with -legacy flag
+                legacy_cmd = basic_cmd + ['-legacy']
+                result = subprocess.run(legacy_cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise ValueError(f"Certificate extraction failed: {result.stderr}")
+            
+            # Read the combined file
+            with open(combined_path, 'r') as f:
+                content = f.read()
+            
+            # Split the content into certificate and private key
+            cert_content = ""
+            key_content = ""
+            current_section = None
+            
+            for line in content.split('\n'):
+                if '-----BEGIN CERTIFICATE-----' in line:
+                    current_section = 'cert'
+                    cert_content = line + '\n'
+                elif '-----BEGIN PRIVATE KEY-----' in line:
+                    current_section = 'key'
+                    key_content = line + '\n'
+                elif '-----END CERTIFICATE-----' in line:
+                    cert_content += line + '\n'
+                    current_section = None
+                elif '-----END PRIVATE KEY-----' in line:
+                    key_content += line + '\n'
+                    current_section = None
+                elif current_section == 'cert':
+                    cert_content += line + '\n'
+                elif current_section == 'key':
+                    key_content += line + '\n'
+            
+            # Write separated files
+            if cert_content and key_content:
+                with open(self.cert_path, 'w') as f:
+                    f.write(cert_content.strip())
+                with open(self.key_path, 'w') as f:
+                    f.write(key_content.strip())
+            else:
+                raise ValueError("Failed to extract certificate or private key from combined file")
+            
+            # Verify the extracted files
+            verify_cert = subprocess.run(['openssl', 'x509', '-in', self.cert_path, '-noout'], 
+                                       capture_output=True, text=True)
+            verify_key = subprocess.run(['openssl', 'rsa', '-in', self.key_path, '-check', '-noout'],
+                                      capture_output=True, text=True)
+            
+            if verify_cert.returncode != 0 or verify_key.returncode != 0:
+                raise ValueError("Invalid certificate or private key")
+            
+            # Clean up combined file
+            os.remove(combined_path)
+            return True
+            
         except Exception as e:
+            if 'combined_path' in locals() and os.path.exists(combined_path):
+                os.remove(combined_path)
             raise ValueError(f"Failed to extract certificates: {str(e)}")
 
     def sign_file(self, file_path):
