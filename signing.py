@@ -160,19 +160,12 @@ activate = 1
             # Copy file to temp location
             shutil.copy2(file_path, content_path)
             
-            # Create certificate chain file
-            chain_path = os.path.join(self.temp_dir, 'chain.pem')
-            with open(chain_path, 'w') as f:
-                with open(self.cert_path) as cert:
-                    f.write(cert.read())
-            
-            # Sign with CMS using proper flags
+            # Simplified CMS signing command
             sign_cmd = [
                 'openssl', 'cms', '-sign',
                 '-signer', self.cert_path,
                 '-inkey', self.key_path,
-                '-binary', '-noattr',
-                '-certfile', chain_path,
+                '-binary',  # Remove -noattr flag
                 '-outform', 'DER',
                 '-in', content_path,
                 '-out', sig_path
@@ -181,16 +174,17 @@ activate = 1
             env = os.environ.copy()
             env['OPENSSL_CONF'] = os.path.join(self.temp_dir, 'openssl.cnf')
             
+            # Execute signing
             result = subprocess.run(sign_cmd, capture_output=True, text=True, env=env)
             if result.returncode != 0:
                 raise ValueError(f"Failed to sign file: {result.stderr}")
             
-            # Move signature to final location
+            # Replace original with signed version
             shutil.move(sig_path, file_path)
             
             # Clean up
-            os.remove(content_path)
-            os.remove(chain_path)
+            if os.path.exists(content_path):
+                os.remove(content_path)
             
             return True
             
