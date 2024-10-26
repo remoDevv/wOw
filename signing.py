@@ -51,20 +51,46 @@ class IPASigner:
             if not self.temp_dir:
                 self.create_temp_dir()
             extract_dir = os.path.join(self.temp_dir, "ipa_contents")
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            # Extract IPA contents
             with zipfile.ZipFile(self.ipa_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
             print("IPA extracted successfully")
 
-            # Find .app directory
+            # Find Payload directory
             payload_dir = os.path.join(extract_dir, "Payload")
-            app_name = next(f for f in os.listdir(payload_dir) if f.endswith('.app'))
-            self.app_path = os.path.join(payload_dir, app_name)
+            if not os.path.exists(payload_dir):
+                raise ValueError("Invalid IPA structure: Payload directory not found")
+
+            # Find .app directory with better error handling
+            app_dirs = [f for f in os.listdir(payload_dir) if f.endswith('.app')]
+            if not app_dirs:
+                raise ValueError("No .app directory found in Payload")
+            self.app_path = os.path.join(payload_dir, app_dirs[0])
             
-            # Verify Info.plist exists
+            # Verify app directory exists
+            if not os.path.exists(self.app_path):
+                raise ValueError(f"App directory not found: {self.app_path}")
+                
+            # Find and verify Info.plist
             info_plist_path = os.path.join(self.app_path, 'Info.plist')
             if not os.path.exists(info_plist_path):
-                raise ValueError(f"Info.plist not found in app bundle: {info_plist_path}")
+                # Try alternate locations
+                alt_paths = [
+                    os.path.join(self.app_path, '_CodeSignature', 'Info.plist'),
+                    os.path.join(extract_dir, 'Info.plist')
+                ]
+                for alt_path in alt_paths:
+                    if os.path.exists(alt_path):
+                        # Copy to correct location
+                        os.makedirs(os.path.dirname(info_plist_path), exist_ok=True)
+                        shutil.copy2(alt_path, info_plist_path)
+                        break
                 
+                if not os.path.exists(info_plist_path):
+                    raise ValueError(f"Info.plist not found in app bundle: {info_plist_path}")
+                    
             print(f"Found app bundle: {self.app_path}")
             return True
         except Exception as e:
@@ -153,6 +179,7 @@ activate = 1
             raise ValueError(f"Failed to extract certificates: {str(e)}")
 
     def sign_file(self, file_path):
+        """Sign a file using OpenSSL CMS"""
         try:
             if not self.temp_dir or not self.cert_path or not self.key_path:
                 raise ValueError("Certificate paths not set")
@@ -253,6 +280,7 @@ activate = 1
             raise ValueError(f"Failed to package IPA: {str(e)}")
 
     def extract_bundle_id(self):
+        """Extract bundle ID from Info.plist"""
         try:
             if not self.app_path:
                 raise ValueError("App path not set")
