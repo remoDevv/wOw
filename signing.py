@@ -5,7 +5,6 @@ import zipfile
 import plistlib
 from datetime import datetime
 from werkzeug.utils import secure_filename
-from OpenSSL import crypto
 import subprocess
 
 class IPASigner:
@@ -76,61 +75,91 @@ class IPASigner:
             raise ValueError(f"Failed to copy provision: {str(e)}")
 
     def extract_from_p12(self):
-        """Extract certificate and private key from P12 using OpenSSL"""
         try:
-            # Read P12 file
-            with open(self.p12_path, 'rb') as f:
-                p12 = crypto.load_pkcs12(f.read(), self.p12_password)
+            # Create OpenSSL command with legacy providers
+            env = os.environ.copy()
+            env['OPENSSL_CONF'] = ''  # Prevent loading system config
             
-            # Extract certificate
-            cert = p12.get_certificate()
+            commands = [
+                # Try with legacy provider
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-nodes',
+                 '-out', os.path.join(self.temp_dir, 'combined.pem'),
+                 '-passin', f'pass:{self.p12_password.decode()}',
+                 '-legacy'],
+                
+                # Try without legacy provider
+                ['openssl', 'pkcs12', '-in', self.p12_path, '-nodes',
+                 '-out', os.path.join(self.temp_dir, 'combined.pem'),
+                 '-passin', f'pass:{self.p12_password.decode()}']
+            ]
+            
+            success = False
+            last_error = None
+            
+            for cmd in commands:
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+                    success = True
+                    break
+                except subprocess.CalledProcessError as e:
+                    last_error = e
+                    continue
+            
+            if not success:
+                raise ValueError(f"Failed to extract certificate: {last_error.stderr if last_error else 'Unknown error'}")
+                
+            # Split combined PEM into certificate and key
+            combined_path = os.path.join(self.temp_dir, 'combined.pem')
             self.cert_path = os.path.join(self.temp_dir, 'cert.pem')
-            with open(self.cert_path, 'wb') as f:
-                f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
-            
-            # Extract private key
-            pkey = p12.get_privatekey()
             self.key_path = os.path.join(self.temp_dir, 'private.key')
-            with open(self.key_path, 'wb') as f:
-                f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, pkey))
             
-            return True
+            with open(combined_path, 'r') as f:
+                combined = f.read()
+                
+            # Extract certificate and key using string manipulation
+            cert_start = '-----BEGIN CERTIFICATE-----'
+            cert_end = '-----END CERTIFICATE-----'
+            key_start = '-----BEGIN PRIVATE KEY-----'
+            key_end = '-----END PRIVATE KEY-----'
+            
+            cert_idx = combined.find(cert_start)
+            key_idx = combined.find(key_start)
+            
+            if cert_idx >= 0 and key_idx >= 0:
+                cert = combined[cert_idx:combined.find(cert_end) + len(cert_end)]
+                key = combined[key_idx:combined.find(key_end) + len(key_end)]
+                
+                with open(self.cert_path, 'w') as f:
+                    f.write(cert)
+                with open(self.key_path, 'w') as f:
+                    f.write(key)
+                    
+                # Clean up combined file
+                os.remove(combined_path)
+                return True
+            else:
+                raise ValueError("Failed to extract certificate and key from combined PEM")
+                
         except Exception as e:
             raise ValueError(f"Failed to extract certificate and key: {str(e)}")
-
-    def generate_signature(self, data):
-        """Generate CMS signature for file data"""
-        try:
-            # Create CMS object
-            cms = crypto.CMS()
-            
-            # Load private key and certificate
-            with open(self.key_path, 'rb') as f:
-                key = crypto.load_privatekey(crypto.FILETYPE_PEM, f.read())
-            with open(self.cert_path, 'rb') as f:
-                cert = crypto.load_certificate(crypto.FILETYPE_PEM, f.read())
-            
-            # Sign the data
-            cms.sign(cert, key, [cert], flags=crypto.CMS_BINARY | crypto.CMS_DETACHED)
-            return cms.to_der()
-        except Exception as e:
-            raise ValueError(f"Failed to generate signature: {str(e)}")
 
     def sign_file(self, filepath):
         """Sign a single file with OpenSSL"""
         try:
-            # Read file content
-            with open(filepath, 'rb') as f:
-                data = f.read()
+            # Use OpenSSL CMS for signing
+            env = os.environ.copy()
+            env['OPENSSL_CONF'] = ''  # Prevent loading system config
             
-            # Generate signature
-            signature = self.generate_signature(data)
+            cmd = [
+                'openssl', 'cms', '-sign', '-binary', '-noattr',
+                '-signer', self.cert_path,
+                '-inkey', self.key_path,
+                '-outform', 'DER',
+                '-in', filepath,
+                '-out', filepath + '.sig'
+            ]
             
-            # Create signature file
-            sig_path = filepath + '.sig'
-            with open(sig_path, 'wb') as f:
-                f.write(signature)
-            
+            subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
             return True
         except Exception as e:
             print(f"Failed to sign file {filepath}: {str(e)}")
@@ -157,7 +186,6 @@ class IPASigner:
             signed_name = f"{ipa_name}_signed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ipa"
             self.signed_ipa_path = os.path.join(os.path.dirname(self.ipa_path), signed_name)
             
-            # Create IPA maintaining signatures
             with zipfile.ZipFile(self.signed_ipa_path, 'w', zipfile.ZIP_STORED) as zf:
                 for root, dirs, files in os.walk(os.path.dirname(self.app_path)):
                     for file in files:
