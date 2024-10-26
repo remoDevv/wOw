@@ -1,19 +1,19 @@
 import os
 import shutil
 import tempfile
-import subprocess
-import plistlib
 import zipfile
+import plistlib
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from OpenSSL import crypto
+import subprocess
 
 class IPASigner:
     def __init__(self, ipa_path, p12_path, provision_path, p12_password):
         self.ipa_path = ipa_path
         self.p12_path = p12_path
         self.provision_path = provision_path
-        self.p12_password = p12_password
+        self.p12_password = p12_password.encode() if isinstance(p12_password, str) else p12_password
         self.temp_dir = None
         self.cert_path = None
         self.key_path = None
@@ -29,6 +29,10 @@ class IPASigner:
     def cleanup(self):
         """Clean up temporary files and directories"""
         try:
+            if self.cert_path and os.path.exists(self.cert_path):
+                os.remove(self.cert_path)
+            if self.key_path and os.path.exists(self.key_path):
+                os.remove(self.key_path)
             if self.temp_dir and os.path.exists(self.temp_dir):
                 shutil.rmtree(self.temp_dir)
         except Exception as e:
@@ -89,52 +93,59 @@ class IPASigner:
             self.key_path = os.path.join(self.temp_dir, 'private.key')
             with open(self.key_path, 'wb') as f:
                 f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, pkey))
-                
+            
             return True
         except Exception as e:
             raise ValueError(f"Failed to extract certificate and key: {str(e)}")
 
-    def sign_application(self):
-        """Sign the application using extracted certificate and key"""
+    def generate_signature(self, data):
+        """Generate CMS signature for file data"""
         try:
-            # Extract entitlements
-            entitlements_path = os.path.join(self.temp_dir, 'entitlements.plist')
-            subprocess.run([
-                'security', 'cms', '-D', '-i', self.provision_path,
-                '-o', entitlements_path
-            ], check=True)
+            # Create CMS object
+            cms = crypto.CMS()
+            
+            # Load private key and certificate
+            with open(self.key_path, 'rb') as f:
+                key = crypto.load_privatekey(crypto.FILETYPE_PEM, f.read())
+            with open(self.cert_path, 'rb') as f:
+                cert = crypto.load_certificate(crypto.FILETYPE_PEM, f.read())
+            
+            # Sign the data
+            cms.sign(cert, key, [cert], flags=crypto.CMS_BINARY | crypto.CMS_DETACHED)
+            return cms.to_der()
+        except Exception as e:
+            raise ValueError(f"Failed to generate signature: {str(e)}")
 
-            # Generate code directory hash
-            codesign_alloc = subprocess.run([
-                'codesign_allocate', '-i', os.path.join(self.app_path, '_CodeSignature/CodeResources'),
-                '-a', 'arm64'
-            ], capture_output=True, check=True)
+    def sign_file(self, filepath):
+        """Sign a single file with OpenSSL"""
+        try:
+            # Read file content
+            with open(filepath, 'rb') as f:
+                data = f.read()
+            
+            # Generate signature
+            signature = self.generate_signature(data)
+            
+            # Create signature file
+            sig_path = filepath + '.sig'
+            with open(sig_path, 'wb') as f:
+                f.write(signature)
+            
+            return True
+        except Exception as e:
+            print(f"Failed to sign file {filepath}: {str(e)}")
+            return False
 
-            # Sign all components
+    def sign_application(self):
+        """Sign the application using OpenSSL"""
+        try:
+            # Sign all executable files
             for root, dirs, files in os.walk(self.app_path):
                 for file in files:
-                    if file.endswith(('.dylib', '.framework/Versions/A', '')):
+                    if file.endswith(('.dylib', '') or 'Frameworks' in root):
                         filepath = os.path.join(root, file)
-                        
-                        # Generate CMS signature
-                        cms = crypto.CMS()
-                        with open(self.key_path, 'rb') as f:
-                            key = crypto.load_privatekey(crypto.FILETYPE_PEM, f.read())
-                        with open(self.cert_path, 'rb') as f:
-                            cert = crypto.load_certificate(crypto.FILETYPE_PEM, f.read())
-                        
-                        # Sign with CMS
-                        cms.sign(cert, key, [cert], flags=crypto.CMS_BINARY)
-                        
-                        # Apply signature
-                        subprocess.run([
-                            'codesign', '-f', '-s', '-',
-                            '--generate-entitlement-der',
-                            '--preserve-metadata=identifier,entitlements,requirements',
-                            '--timestamp=none',
-                            filepath
-                        ], input=cms.to_der(), check=True)
-
+                        if os.path.isfile(filepath):
+                            self.sign_file(filepath)
             return True
         except Exception as e:
             raise ValueError(f"Failed to sign application: {str(e)}")
@@ -174,7 +185,7 @@ class IPASigner:
             self.create_temp_dir()
             self.extract_ipa()
             self.copy_provision()
-            self.extract_from_p12()  # Updated to use new OpenSSL method
+            self.extract_from_p12()
             self.sign_application()
             signed_path = self.package_ipa()
             return True, signed_path
